@@ -33,10 +33,20 @@ public static class CanonicalJson
         JsonObject o => new JsonObject(o.OrderBy(p => p.Key, StringComparer.Ordinal)
             .Select(p => KeyValuePair.Create(p.Key, Sort(p.Value)))),
         JsonArray a => new JsonArray(a.Select(Sort).ToArray()),
+        JsonValue v when v.GetValueKind() == JsonValueKind.Number => NormalizeNumber(v),
         JsonValue v => JsonNode.Parse(v.ToJsonString()),
         null => null,
         _ => throw new InvalidOperationException("Unexpected JSON node type."),
     };
+
+    /// <summary>0.6, 0.60 and 6e-1 are one value; give them one text so equal content hashes equally.</summary>
+    private static JsonNode NormalizeNumber(JsonValue v)
+    {
+        var text = v.ToJsonString();
+        return decimal.TryParse(text, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d)
+            ? JsonValue.Create(Dec.Normalize(d))
+            : JsonNode.Parse(text)!;
+    }
 
     public static byte[] Utf8(string s) => new UTF8Encoding(false).GetBytes(s);
 }

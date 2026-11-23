@@ -23,15 +23,29 @@ and the installed Claude Code 2.1.330 binary (`--help` and `auth status` code pa
   the official CLI under your own login, for personal use. Keep research runs manual and low-volume.
 - `total_cost_usd` in `-p` JSON output is a client-side estimate, not a bill.
 
-**How the guard applies this** (`BillingGuard`, `ClaudeResearchRunner`):
-1. Rebuild the child environment without `ANTHROPIC_*`, `CLAUDE_CODE_USE_*`, `OPENROUTER_*`, `OPENAI_*`, and `AWS_BEARER_TOKEN_BEDROCK`.
-2. Run `claude auth status` in that environment. Require `loggedIn`, `apiProvider = firstParty`, and no `apiKeySource`.
-   `authMethod` must be `claude.ai` with a `subscriptionType`, or `oauth_token` with `CLAUDE_CODE_OAUTH_TOKEN` present.
-   Anything else is refused and audited in `research_runs`. There is no override.
-3. Run `claude -p "<prompt>" --output-format json --json-schema <schema> --no-session-persistence --strict-mcp-config
+**How the guard applies this** (`BillingGuard`, `ClaudeResearchRunner`). Every step fails closed, and every attempt,
+including refusals, is audited in `research_runs`:
+1. **Allowlisted child environment.** Only system basics, proxy/CA variables, `LC_*`, `CLAUDE_CONFIG_DIR`, and
+   `CLAUDE_CODE_OAUTH_TOKEN` pass through. Everything else is dropped, including `ANTHROPIC_*`, `CLAUDE_CODE_USE_*`,
+   session-injected token files, and unknown variables.
+2. **Settings files.** User `settings.json` (`$CLAUDE_CONFIG_DIR` or `~/.claude`) and managed settings must not set
+   `apiKeyHelper` or a billing-relevant `env` key (`ANTHROPIC_*` except `*_MODEL`, `CLAUDE_CODE_USE_*`, OpenAI/OpenRouter,
+   `AWS_BEARER_TOKEN_BEDROCK`). Managed settings are `managed-settings.json` plus `managed-settings.d/*.json` in
+   `/etc/claude-code`, `/Library/Application Support/ClaudeCode`, or `C:\Program Files\ClaudeCode`.
+   An unreadable or invalid file refuses the run. This layer exists because `claude auth status` does not reveal a
+   base-URL gateway.
+3. **`claude auth status`** in that environment must report `loggedIn`, `apiProvider = firstParty`, and no `apiKeySource`.
+   `authMethod` must be `claude.ai` with a `subscriptionType`, or `oauth_token` with a **non-empty** `CLAUDE_CODE_OAUTH_TOKEN`.
+4. **Model run.** `claude -p "<prompt>" --output-format json --json-schema <schema> --no-session-persistence --strict-mcp-config
    --disable-slash-commands --permission-mode dontAsk --tools WebSearch,WebFetch --allowedTools WebSearch,WebFetch`
-   in an empty temp directory, so no project CLAUDE.md, hooks, or `.mcp.json` load. The packet goes in on stdin.
-4. `structured_output` goes through the same strict `ResultImporter` as a manual import.
+   runs in an empty temp directory, which is refused if it is inside a git repo, so no project settings, hooks,
+   CLAUDE.md, or `.mcp.json` load. The packet goes in on stdin.
+5. **Import.** `structured_output` must answer the same `packet_id` and ticker that were run, then passes through the
+   same strict `ResultImporter` as a manual import.
+
+**Residual risk the guard cannot see:** MDM profiles (macOS `com.anthropic.claudecode`, Windows HKLM policy) and
+server-managed settings from a Team/Enterprise admin console. On a personal Pro/Max login neither normally exists.
+Check `/status` → `Setting sources` once on your machine.
 
 **This cloud container:** `claude auth status` reports `oauth_token` with no `CLAUDE_CODE_OAUTH_TOKEN`, which is a
 session-injected credential. The guard cannot prove that is subscription auth, so it refuses (verified live:

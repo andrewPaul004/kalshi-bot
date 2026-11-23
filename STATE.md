@@ -1,6 +1,6 @@
 # State
 
-_Last updated 2026-11-23, Phases 1–2 milestone._
+_Last updated 2026-11-23, Phases 1–2 milestone plus review fixes._
 
 ## Mode
 
@@ -24,8 +24,28 @@ subscription-guarded CLI path. Live bankroll and limits: **not selected**.
 | Status text, HTML file, and loopback server | `kb status [--html F]`, `kb serve` | CLI smoke (HTTP 200, labels present) |
 | Offline end-to-end demo | `kb demo` | Run: buy 1 YES @ 0.45 (fee 0.02), settles yes, cash 100.53, ledger OK |
 
-90 tests pass (`dotnet test`, about 2 s). A mutation check confirmed six guard edits each turn the suite red: env scrub,
-api_key auth accepted, live mode allowed, idempotency removed, unknown keys allowed, ledger oversell.
+116 tests pass (`dotnet test`, about 3 s). A mutation check confirmed that breaking any of these guards turns the suite red:
+env scrub, api_key auth accepted, live mode allowed, idempotency removed, unknown keys allowed, ledger oversell.
+
+**Independent review (milestone 1).** A separate reviewer confirmed 9 defects and flagged 1 plausible one; all 10 are fixed.
+Each fix has a regression test in `ReviewRegressionTests`, `RiskEngineTests` or `RecoveryTests`, and each test was shown
+to fail when its fix is reverted:
+1. **Billing guard:** an empty `CLAUDE_CODE_OAUTH_TOKEN` passed the guard, the environment filter was a denylist with gaps,
+   and a gateway set in a settings file was invisible. Now: allowlisted environment, inspection of settings files, and a
+   non-empty token is required.
+2. **Runner:** a result for a different packet was imported. Now rejected.
+3. **Data origin:** an estimate built on `live:demo` data was accepted against a `live:production` snapshot. The origin must
+   now match exactly.
+4. **Estimate age** was measured from import time. Now measured from `as_of` (migration 2).
+5. **Re-trading one snapshot** was possible through cosmetic changes (`0.05` vs `0.050`, `0.6` vs `0.60`). Values are now
+   normalized, and each snapshot's liquidity can be used only once per side and action.
+6. **Worst-case cost** underestimated per-level fee rounding, so cash could go negative. It is now a true upper bound, and
+   the engine asserts the bound holds.
+7. **Settlement** accepted a finalized snapshot from a different data origin. Now refused, and positions cannot mix origins.
+8. **`Verify`** missed forged entries. It now rebuilds the expected ledger from fills, orders and settlements and replays it.
+9. **`INSERT OR REPLACE`** got around the append-only triggers. Fixed with `recursive_triggers = ON`.
+10. **An HTTP timeout** aborted a capture and left the run `running`. A timeout is now a per-ticker error, and any other
+    abort marks the run `failed`.
 
 ## Blockers (exact)
 
@@ -47,6 +67,8 @@ api_key auth accepted, live mode allowed, idempotency removed, unknown keys allo
 - Single-writer assumption: don't run two recorders against one database at the same time.
 - The research JSON schema passed to `--json-schema` avoids range and length keywords whose CLI support was unverifiable.
   The importer enforces them instead.
+- The billing guard cannot inspect MDM or server-managed Claude settings (see `docs/INTEGRATION_NOTES.md`). Check
+  `/status` → `Setting sources` once.
 
 ## Next concrete actions
 

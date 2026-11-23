@@ -39,7 +39,8 @@ public sealed class ResearchStore(Db db)
             """,
             r => r.DN("probability_yes") is not { } p ? null : new ProbabilityEstimate(
                 r.L("id"), r.S("packet_id"), r.L("snapshot_id"), r.S("rules_sha256"), r.S("data_origin"), p,
-                r.S("confidence"), r.S("source_kind"), r.S("validation_status"), Ts.Parse(r.S("imported_at"))),
+                r.S("confidence"), r.S("source_kind"), r.S("validation_status"), Ts.Parse(r.S("imported_at")),
+                Ts.ParseExternal(r.Str("as_of")) ?? Ts.Parse(r.S("imported_at"))),
             ("$t", ticker)).FirstOrDefault();
 
     private static StoredResult MapResult(Microsoft.Data.Sqlite.SqliteDataReader r) => new(

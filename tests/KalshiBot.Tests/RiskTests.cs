@@ -20,8 +20,8 @@ public class RiskEngineTests
             held == 0 && openCost == 0m ? [] : [new PositionView(Fx.T50, Side.Yes, held, openCost)],
             todaySpent, 0m, halted);
 
-    private static ProbabilityEstimate Est(string rules = "R", string origin = "fixture:synthetic", DateTimeOffset? imported = null) =>
-        new(1, "pk", 1, rules, origin, 0.6m, "low", "synthetic-fixture", "unvalidated", imported ?? Clock.Now);
+    private static ProbabilityEstimate Est(string rules = "R", string origin = "fixture:synthetic", DateTimeOffset? asOf = null) =>
+        new(1, "pk", 1, rules, origin, 0.6m, "low", "synthetic-fixture", "unvalidated", Clock.Now, asOf ?? Clock.Now);
 
     private static RiskVerdict Eval(OrderIntent o, MarketSnapshot? s = null, AccountState? a = null,
         ProbabilityEstimate? e = null, ExecutionMode mode = ExecutionMode.Paper) =>
@@ -49,8 +49,13 @@ public class RiskEngineTests
     public void Estimate_provenance_is_checked()
     {
         Assert.Contains("market rules changed since the research packet was built", Eval(Buy(), e: Est(rules: "OTHER")).Reasons);
-        Assert.Contains(Eval(Buy(), e: Est(origin: "live:production")).Reasons, r => r.Contains("differ in data origin"));
-        Assert.Contains(Eval(Buy(), e: Est(imported: Clock.Now.AddDays(-2))).Reasons, r => r.StartsWith("research estimate older than"));
+        Assert.Contains(Eval(Buy(), e: Est(origin: "live:production")).Reasons, r => r.StartsWith("research estimate is from live:production data"));
+        // Live demo vs live production also differs (review finding 3).
+        var prodSnap = Snap(origin: "live:production");
+        Assert.Contains(Eval(Buy(), prodSnap, e: Est(origin: "live:demo")).Reasons, r => r.StartsWith("research estimate is from live:demo data"));
+        Assert.True(Eval(Buy(), prodSnap, e: Est(origin: "live:production")).Approved);
+        // Age is measured from the evidence date (as_of), even when the import is fresh (review finding 4).
+        Assert.Contains(Eval(Buy(), e: Est(asOf: Clock.Now.AddDays(-90))).Reasons, r => r.StartsWith("research estimate evidence (as_of) older than"));
     }
 
     [Theory]
@@ -90,6 +95,37 @@ public class RiskEngineTests
         Assert.Contains(Eval(Buy(qty: 2), a: Account(held: 19, openCost: 5m)).Reasons, r => r.StartsWith("position would exceed"));
         Assert.Contains(Eval(Buy(qty: 5), a: Account(held: 1, openCost: 48m)).Reasons, r => r.StartsWith("open cost basis would exceed"));
         Assert.Contains(Eval(Buy(), a: Account(todaySpent: 24.9m)).Reasons, r => r.StartsWith("daily premium would exceed"));
+    }
+
+    [Fact]
+    public void Worst_case_cost_bounds_per_level_fee_rounding()
+    {
+        // Review finding 6: eight one-contract asks 0.173..0.180 at a 0.001 tick. Per-level rounding costs more than
+        // one rounded fee on the total; the bound must still cover it.
+        var levels = Enumerable.Range(0, 8).Select(i => new KalshiBot.Core.Kalshi.PriceLevel(1m - (0.173m + i * 0.001m), 1m)).ToList();
+        var book = new KalshiBot.Core.Kalshi.OrderBook([], levels);
+        var o = new OrderIntent(Fx.T50, Side.Yes, OrderAction.Buy, 8, 0.180m);
+        var fills = PaperBroker.Simulate(o, book);
+        var actual = fills.Sum(f => f.Quantity * f.Price + f.Fee);
+        Assert.Equal(8, fills.Sum(f => f.Quantity));
+        Assert.Equal(1.572m, actual);
+        Assert.True(RiskEngine.WorstCaseBuyCost(o, null) >= actual);
+
+        // With exactly the old single-fee estimate (1.53) in cash, the order is now refused instead of going negative.
+        const string fine = """[{"start":"0.0000","end":"1.0000","step":"0.0010"}]""";
+        var snap = Snap() with { PriceRangesJson = fine };
+        var v = Risk.Evaluate(o, new RiskContext(ExecutionMode.Paper, snap, "R", null, Account(cash: 1.53m), Clock.Now));
+        Assert.Contains(v.Reasons, r => r.StartsWith("insufficient paper cash"));
+    }
+
+    [Fact]
+    public void Snapshot_liquidity_reuse_and_origin_mixing_are_refused()
+    {
+        var used = Risk.Evaluate(Buy(), new RiskContext(ExecutionMode.Paper, Snap(), "R", null, Account(), Clock.Now, SnapshotLiquidityUsed: true));
+        Assert.Contains(used.Reasons, r => r.StartsWith("this snapshot's liquidity was already used"));
+        var mixed = Risk.Evaluate(Buy(), new RiskContext(ExecutionMode.Paper, Snap(origin: "live:production"), "R", null, Account(), Clock.Now,
+            PositionOrigins: ["fixture:synthetic"]));
+        Assert.Contains(mixed.Reasons, r => r.StartsWith("existing position in this market came from fixture:synthetic"));
     }
 
     [Fact]
@@ -142,7 +178,7 @@ public class StrategyTests
         using var t = new TempDb();
         Fx.Record(t.Db, Clock, Fx.Open, Fx.T50);
         var s = new MarketStore(t.Db).Latest(Fx.T50)!;
-        ProbabilityEstimate Est(decimal p) => new(1, "pk", s.Id, "R", s.DataOrigin, p, "low", "manual", "unvalidated", Clock.Now);
+        ProbabilityEstimate Est(decimal p) => new(1, "pk", s.Id, "R", s.DataOrigin, p, "low", "manual", "unvalidated", Clock.Now, Clock.Now);
         var strategy = new EdgeThresholdStrategy(minEdge: 0.05m);
 
         // p=0.60: yes ask 0.45 + fee 0.02 -> edge 0.13.

@@ -76,20 +76,31 @@ public sealed class Recorder(Db db, KalshiPublicClient client, TimeProvider time
                 snapshots++;
                 if (changed) rulesChanges++;
             }
-            catch (Exception e) when (e is FormatException or System.Text.Json.JsonException or HttpRequestException or InvalidOperationException)
+            catch (Exception e) when (e is FormatException or System.Text.Json.JsonException or HttpRequestException or InvalidOperationException
+                                        || (e is TaskCanceledException && !ct.IsCancellationRequested)) // HttpClient timeout
             {
-                errors.Add($"{ticker}: {e.GetType().Name}: {e.Message}");
+                errors.Add($"{ticker}: {(e is TaskCanceledException ? "request timed out" : e.GetType().Name + ": " + e.Message)}");
+            }
+            catch (Exception e)
+            {
+                // Anything else (including cancellation) ends the run; record why instead of leaving it 'running'.
+                errors.Add($"{ticker}: aborted: {e.GetType().Name}: {e.Message}");
+                Finish(runId, "failed", errors);
+                throw;
             }
         }
 
         var status = errors.Count == 0 ? "completed" : snapshots > 0 ? "partial" : "failed";
         if (list.Count == 0) status = "completed";
+        Finish(runId, status, errors);
+        return new CaptureSummary(runId, status, origin, snapshots, rulesChanges, errors);
+    }
+
+    private void Finish(long runId, string status, List<string> errors) =>
         db.Exec("UPDATE capture_runs SET status = $st, finished_at = $f, detail = $d WHERE id = $id",
             ("$st", status), ("$f", Ts.ToText(time.GetUtcNow())),
             ("$d", errors.Count == 0 ? null : new JsonArray(errors.Select(e => (JsonNode)e).ToArray()).ToJsonString()),
             ("$id", runId));
-        return new CaptureSummary(runId, status, origin, snapshots, rulesChanges, errors);
-    }
 
     private async Task CaptureEventAndSeriesAsync(long runId, string origin, string eventTicker, HashSet<string> seenSeries,
         List<string> errors, CancellationToken ct)

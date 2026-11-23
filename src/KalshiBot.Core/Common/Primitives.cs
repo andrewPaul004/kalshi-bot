@@ -27,6 +27,9 @@ public static class Dec
 
     public static string ToText(decimal d) => d.ToString(CultureInfo.InvariantCulture);
 
+    /// <summary>Removes trailing zeros (0.050 -> 0.05) so equal values have one text form.</summary>
+    public static decimal Normalize(decimal d) => d / 1.0000000000000000000000000000m;
+
     /// <summary>Display only: at least 2 and at most 6 decimals (100.5300 -> 100.53). Storage keeps ToText.</summary>
     public static string Show(decimal d) => d.ToString("0.00####", CultureInfo.InvariantCulture);
 

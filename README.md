@@ -13,7 +13,7 @@ Claude research runs only through the official `claude` CLI under your own subsc
 Requires the .NET 10 SDK. `./kb` is a bash wrapper; on Windows use `dotnet run --project src/KalshiBot.Cli -- <args>`.
 
 ```bash
-dotnet test                 # 90 tests, offline
+dotnet test                 # 116 tests, offline
 ./kb demo                   # offline end-to-end on SYNTHETIC fixtures -> data/demo.db, data/demo-status.html
 ./kb help
 ```

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds (incrementally) and runs the kalshi-bot CLI from any directory. Relative paths resolve from your cwd.
 set -euo pipefail
+export DOTNET_CLI_TELEMETRY_OPTOUT=1 DOTNET_NOLOGO=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if ! out=$(dotnet build "$ROOT/src/KalshiBot.Cli/KalshiBot.Cli.csproj" -c Release -nologo 2>&1); then
   echo "$out" >&2

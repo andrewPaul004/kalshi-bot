@@ -24,8 +24,11 @@ public sealed record RiskLimits
     public static RiskLimits PaperDefaults => new();
 }
 
+/// <param name="SnapshotLiquidityUsed">An earlier paper order already filled against this snapshot (same side and action).</param>
+/// <param name="PositionOrigins">Data origins of the paper orders that built the current position in this market.</param>
 public sealed record RiskContext(ExecutionMode Mode, MarketSnapshot Snapshot, string SnapshotRulesSha256,
-    ProbabilityEstimate? Estimate, AccountState Account, DateTimeOffset Now, decimal? FeeMultiplier = null);
+    ProbabilityEstimate? Estimate, AccountState Account, DateTimeOffset Now, decimal? FeeMultiplier = null,
+    bool SnapshotLiquidityUsed = false, IReadOnlyCollection<string>? PositionOrigins = null);
 
 public sealed record RiskVerdict(bool Approved, IReadOnlyList<string> Reasons)
 {
@@ -55,8 +58,8 @@ public sealed class RiskEngine(RiskLimits limits)
         if (c.Estimate is { } e)
         {
             if (e.PacketRulesSha256 != c.SnapshotRulesSha256) r.Add("market rules changed since the research packet was built");
-            if (DataOrigin.IsSynthetic(e.PacketDataOrigin) != s.IsSynthetic) r.Add("research estimate and market snapshot differ in data origin (synthetic vs live)");
-            if (c.Now - e.ImportedAt > limits.MaxEstimateAge) r.Add($"research estimate older than {limits.MaxEstimateAge}");
+            if (e.PacketDataOrigin != s.DataOrigin) r.Add($"research estimate is from {e.PacketDataOrigin} data but the snapshot is {s.DataOrigin}");
+            if (c.Now - e.AsOf > limits.MaxEstimateAge) r.Add($"research estimate evidence (as_of) older than {limits.MaxEstimateAge}");
         }
 
         // Order shape.
@@ -77,13 +80,17 @@ public sealed class RiskEngine(RiskLimits limits)
         if (s.CloseTime is not { } close) r.Add("snapshot has no close_time");
         else if (close - c.Now < limits.MinTimeToClose) r.Add($"less than {limits.MinTimeToClose} to close");
 
+        if (c.SnapshotLiquidityUsed) r.Add("this snapshot's liquidity was already used by an earlier paper order; record a new snapshot");
+        if (c.PositionOrigins?.FirstOrDefault(o => o != s.DataOrigin) is { } other)
+            r.Add($"existing position in this market came from {other} data; snapshot is {s.DataOrigin}");
+
         // Exposure and cash.
         if (o.Quantity > 0 && o.LimitPrice is > 0m and < 1m)
         {
             var held = c.Account.Held(o.Ticker, o.Side);
             if (o.Action == OrderAction.Buy)
             {
-                var worstCost = o.Quantity * o.LimitPrice + FeeModel.TakerFee(o.Quantity, o.LimitPrice, c.FeeMultiplier);
+                var worstCost = WorstCaseBuyCost(o, c.FeeMultiplier);
                 if (worstCost > limits.MaxOrderCost) r.Add($"worst-case cost {Dec.ToText(worstCost)} exceeds max order cost {Dec.ToText(limits.MaxOrderCost)}");
                 if (worstCost > c.Account.Cash) r.Add($"insufficient paper cash ({Dec.ToText(c.Account.Cash)} < {Dec.ToText(worstCost)})");
                 if (held + o.Quantity > limits.MaxPositionPerMarketSide) r.Add($"position would exceed {limits.MaxPositionPerMarketSide} contracts");
@@ -97,6 +104,17 @@ public sealed class RiskEngine(RiskLimits limits)
         }
 
         return new RiskVerdict(r.Count == 0, r);
+    }
+
+    /// <summary>
+    /// True upper bound on what a buy can cost: every contract at the limit, plus a separately rounded fee per contract
+    /// at the fee-maximizing price at or below the limit. The broker rounds fees per price level, which is never more
+    /// than rounding per contract, so actual cost cannot exceed this.
+    /// </summary>
+    public static decimal WorstCaseBuyCost(OrderIntent o, decimal? feeMultiplier)
+    {
+        var feePeak = Math.Min(o.LimitPrice, 0.5m);
+        return o.Quantity * o.LimitPrice + o.Quantity * FeeModel.TakerFee(1, feePeak, feeMultiplier);
     }
 
     /// <summary>Tick check against Kalshi price_ranges [{start,end,step}]; without ranges, require whole cents.</summary>

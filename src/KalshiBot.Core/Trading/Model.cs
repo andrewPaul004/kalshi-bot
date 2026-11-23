@@ -25,7 +25,8 @@ public static class OrderAction
 /// </summary>
 public sealed record ProbabilityEstimate(
     long ResearchResultId, string PacketId, long PacketSnapshotId, string PacketRulesSha256, string PacketDataOrigin,
-    decimal ProbabilityYes, string Confidence, string SourceKind, string ValidationStatus, DateTimeOffset ImportedAt)
+    decimal ProbabilityYes, string Confidence, string SourceKind, string ValidationStatus, DateTimeOffset ImportedAt,
+    DateTimeOffset AsOf)
 {
     public bool IsValidated => ValidationStatus == "validated";
     public string Label => IsValidated ? "validated" : "EXPERIMENTAL (unvalidated)";
@@ -33,7 +34,8 @@ public sealed record ProbabilityEstimate(
 
 public sealed record PositionView(string Ticker, string Side, long Quantity, decimal CostBasis);
 
-public sealed record StrategyInput(MarketSnapshot Snapshot, string RulesSha256, ProbabilityEstimate? Estimate, IReadOnlyList<PositionView> Positions);
+public sealed record StrategyInput(MarketSnapshot Snapshot, string RulesSha256, ProbabilityEstimate? Estimate,
+    IReadOnlyList<PositionView> Positions, decimal? FeeMultiplier = null);
 
 public sealed record OrderIntent(string Ticker, string Side, string Action, int Quantity, decimal LimitPrice);
 

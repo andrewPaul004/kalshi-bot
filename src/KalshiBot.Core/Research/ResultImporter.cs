@@ -147,12 +147,13 @@ public sealed partial class ResultImporter(Db db, TimeProvider time)
 
             var id = db.Insert("""
                 INSERT INTO research_results (packet_id, result_sha256, ticker, rules_sha256, probability_yes, abstain_reason,
-                    confidence, source_kind, validation_status, imported_at, result_json)
-                VALUES ($p, $h, $t, $r, $prob, $ab, $c, $sk, 'unvalidated', $at, $j)
+                    confidence, source_kind, validation_status, imported_at, result_json, as_of)
+                VALUES ($p, $h, $t, $r, $prob, $ab, $c, $sk, 'unvalidated', $at, $j, $asof)
                 """,
                 ("$p", packetId), ("$h", sha), ("$t", ticker), ("$r", rulesSha),
                 ("$prob", probability is null ? null : Dec.ToText(probability.Value)), ("$ab", abstain), ("$c", confidence),
-                ("$sk", sourceKind), ("$at", Ts.ToText(time.GetUtcNow())), ("$j", canonical));
+                ("$sk", sourceKind), ("$at", Ts.ToText(time.GetUtcNow())), ("$j", canonical),
+                ("$asof", Ts.ToText(DateTimeOffset.Parse(asOf!, CultureInfo.InvariantCulture))));
             return new ImportOutcome(id, packetId!, ticker!, probability, false);
         }
     }

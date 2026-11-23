@@ -34,6 +34,8 @@ public sealed class Db : IDisposable
         conn.Open();
         var db = new Db(conn, path);
         db.Exec("PRAGMA foreign_keys = ON;");
+        // Without this, INSERT OR REPLACE deletes the old row without firing the append-only delete triggers.
+        db.Exec("PRAGMA recursive_triggers = ON;");
         db.Exec("PRAGMA busy_timeout = 5000;");
         if (path != ":memory:")
         {

@@ -155,6 +155,21 @@ public class RecoveryTests
         Assert.Contains("append-only", e.Message);
     }
 
+    [Theory]
+    [InlineData("INSERT OR REPLACE INTO ledger_entries (id, account_id, ts, kind, cash_delta) SELECT id, account_id, ts, kind, '1000000' FROM ledger_entries WHERE kind = 'deposit'")]
+    [InlineData("REPLACE INTO paper_fills SELECT id, order_id, ticker, side, action, quantity, '0.01', fee, filled_at, simulated FROM paper_fills")]
+    [InlineData("INSERT OR REPLACE INTO raw_responses SELECT id, capture_run_id, method, url, http_status, requested_at, received_at, server_date, body_sha256, '{}' FROM raw_responses LIMIT 1")]
+    public void Insert_or_replace_cannot_rewrite_history(string sql)
+    {
+        // Review finding 9: REPLACE's implicit delete skipped the delete triggers while recursive_triggers was off.
+        var (t, clock) = PaperWorkflowTests.Ready();
+        using var _ = t;
+        PaperWorkflowTests.Engine(t.Db, clock).Run("paper", Fx.T50, new EdgeThresholdStrategy());
+        var e = Assert.Throws<SqliteException>(() => t.Db.Exec(sql));
+        Assert.Contains("append-only", e.Message);
+        Assert.Equal("100", t.Db.Scalar<string>("SELECT cash_delta FROM ledger_entries WHERE kind = 'deposit'"));
+    }
+
     [Fact]
     public void Migrations_are_idempotent_across_restarts()
     {
@@ -162,9 +177,17 @@ public class RecoveryTests
         t.Reopen();
         t.Reopen();
         Assert.Equal(Schema.LatestVersion, t.Db.Scalar<long>("SELECT MAX(version) FROM schema_migrations"));
-        Assert.Equal(1, t.Db.Scalar<long>("SELECT COUNT(*) FROM schema_migrations"));
+        Assert.Equal(Schema.LatestVersion, t.Db.Scalar<long>("SELECT COUNT(*) FROM schema_migrations"));
         Assert.Equal("wal", t.Db.Scalar<string>("PRAGMA journal_mode"));
         Assert.Equal(1, t.Db.Scalar<long>("PRAGMA foreign_keys"));
+    }
+
+    [Fact]
+    public void Normalize_gives_equal_values_one_text()
+    {
+        Assert.Equal("0.05", Dec.ToText(Dec.Normalize(0.050m)));
+        Assert.Equal("1", Dec.ToText(Dec.Normalize(1.000m)));
+        Assert.Equal(CanonicalJson.HashOf(JsonNode.Parse("{\"p\":0.6}")), CanonicalJson.HashOf(JsonNode.Parse("{\"p\":0.60}")));
     }
 
     [Theory]

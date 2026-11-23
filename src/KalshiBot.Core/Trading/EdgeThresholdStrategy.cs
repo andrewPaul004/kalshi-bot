@@ -13,7 +13,7 @@ public sealed class EdgeThresholdStrategy(decimal minEdge = 0.05m, int contracts
     public string Id => "edge-threshold/1";
 
     public string Parameters => string.Create(CultureInfo.InvariantCulture,
-        $"min_edge={minEdge};contracts={contracts};max_held_per_side={maxHeldPerSide}");
+        $"min_edge={Dec.Normalize(minEdge)};contracts={contracts};max_held_per_side={maxHeldPerSide}");
 
     public StrategyDecision Decide(StrategyInput input)
     {
@@ -30,7 +30,7 @@ public sealed class EdgeThresholdStrategy(decimal minEdge = 0.05m, int contracts
             if (asks.Count == 0) continue;
             var ask = asks[0].Price;
             var p = side == Side.Yes ? est.ProbabilityYes : 1m - est.ProbabilityYes;
-            var feePerContract = FeeModel.TakerFee(1, ask);
+            var feePerContract = FeeModel.TakerFee(1, ask, input.FeeMultiplier);
             candidates.Add((side, p - ask - feePerContract, ask));
         }
 

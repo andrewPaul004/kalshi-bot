@@ -234,6 +234,11 @@ public static class Schema
             PRIMARY KEY (account_id, ticker)
         );
         """),
+        (2, """
+        -- Estimate freshness is measured from when the evidence was current (as_of), not from import time.
+        ALTER TABLE research_results ADD COLUMN as_of TEXT;
+        UPDATE research_results SET as_of = json_extract(result_json, '$.as_of') WHERE as_of IS NULL;
+        """),
     ];
 
     public static int LatestVersion => Migrations[^1].Version;

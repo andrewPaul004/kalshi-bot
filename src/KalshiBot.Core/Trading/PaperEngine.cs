@@ -52,7 +52,7 @@ public sealed class PaperEngine(Db db, TimeProvider time, RiskEngine risk)
 
         var state = ledger.State(accountId, controls.Halted);
         var positions = state.Positions.Where(p => p.Ticker == ticker).ToList();
-        var input = new StrategyInput(snapshot, rules.Sha256, estimate, positions);
+        var input = new StrategyInput(snapshot, rules.Sha256, estimate, positions, feeMultiplier);
         var decisionId = DecisionId(strategy, input, accountId);
 
         var prior = db.Query("SELECT client_order_id FROM paper_orders WHERE decision_id = $d", r => r.S("client_order_id"), ("$d", decisionId));
@@ -68,8 +68,15 @@ public sealed class PaperEngine(Db db, TimeProvider time, RiskEngine risk)
             outcomes.Add(db.InTransaction(() =>
             {
                 var current = ledger.State(accountId, controls.Halted);
-                var verdict = risk.Evaluate(intent, new RiskContext(mode, snapshot, rules.Sha256, estimate, current, time.GetUtcNow(), feeMultiplier));
+                var liquidityUsed = db.Scalar<long>("""
+                    SELECT COUNT(*) FROM paper_fills f JOIN paper_orders o ON o.id = f.order_id
+                    WHERE o.account_id = $a AND o.snapshot_id = $s AND o.side = $side AND o.action = $act
+                    """, ("$a", accountId), ("$s", snapshot.Id), ("$side", intent.Side), ("$act", intent.Action)) > 0;
+                var verdict = risk.Evaluate(intent, new RiskContext(mode, snapshot, rules.Sha256, estimate, current, time.GetUtcNow(),
+                    feeMultiplier, liquidityUsed, ledger.PositionOrigins(accountId, intent.Ticker)));
                 var fills = verdict.Approved && snapshot.Book is { } book ? PaperBroker.Simulate(intent, book, feeMultiplier) : [];
+                if (intent.Action == OrderAction.Buy && fills.Sum(f => f.Quantity * f.Price + f.Fee) > RiskEngine.WorstCaseBuyCost(intent, feeMultiplier))
+                    throw new InvalidOperationException("Simulated cost exceeded the risk engine's worst-case bound; refusing to book it.");
                 var filled = fills.Sum(f => f.Quantity);
                 var status = !verdict.Approved ? "rejected" : filled == 0 ? "unfilled" : filled < intent.Quantity ? "partially_filled" : "filled";
 
@@ -115,6 +122,7 @@ public sealed class PaperEngine(Db db, TimeProvider time, RiskEngine risk)
             ["snapshot_id"] = input.Snapshot.Id,
             ["rules_sha256"] = input.RulesSha256,
             ["research_result_id"] = input.Estimate?.ResearchResultId,
+            ["fee_multiplier"] = input.FeeMultiplier is { } m ? Dec.ToText(Dec.Normalize(m)) : null,
         });
 
     private static decimal? FeeMultiplierFor(MarketStore store, MarketSnapshot s)

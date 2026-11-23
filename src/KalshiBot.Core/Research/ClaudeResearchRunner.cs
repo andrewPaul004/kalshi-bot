@@ -10,6 +10,9 @@ public sealed record ClaudeRunOptions
     public string ClaudePath { get; init; } = "claude";
     public string? Model { get; init; }
     public TimeSpan Timeout { get; init; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>Managed settings directory; null = the OS default documented at code.claude.com/docs/en/managed-settings.</summary>
+    public string? ManagedSettingsDir { get; init; }
 }
 
 public sealed record ClaudeRunResult(long RunId, string Outcome, AuthVerdict Verdict, ImportOutcome? Imported, string Detail);
@@ -32,11 +35,27 @@ public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunne
         var packet = new ResearchStore(db).Packet(packetId) ?? throw new KalshiBotException($"Unknown packet {packetId}.");
         var started = time.GetUtcNow();
         var env = BillingGuard.SanitizedEnvironment(parentEnv, out var removed);
-        var removedNote = removed.Count == 0 ? "" : $"removed from child env: {string.Join(", ", removed)}. ";
+        var billingRemoved = removed.Where(BillingGuard.IsBillingSwitch).ToList();
+        var removedNote = removed.Count == 0 ? "" :
+            $"child env: dropped {removed.Count} non-allowlisted variable(s)" +
+            (billingRemoved.Count == 0 ? ". " : $", including billing-relevant {string.Join(", ", billingRemoved)}. ");
+
+        var settingsReasons = BillingGuard.InspectSettings(SettingsFiles(env));
+        if (settingsReasons.Count > 0)
+        {
+            var v = new AuthVerdict(false, null, null, settingsReasons);
+            return Audit(packetId, started, "refused", v, removedNote + string.Join("; ", settingsReasons), null, null);
+        }
 
         var workDir = Directory.CreateTempSubdirectory("kalshibot-research-").FullName;
         try
         {
+            if (InsideGitRepository(workDir))
+            {
+                var v = new AuthVerdict(false, null, null, ["temp directory is inside a git repository; project settings could load"]);
+                return Audit(packetId, started, "refused", v, removedNote + v.Reasons[0], null, null);
+            }
+
             ProcessResult status;
             try
             {
@@ -70,6 +89,12 @@ public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunne
                     return Audit(packetId, started, "failed", verdict, removedNote + $"claude reported an error (exit {run.ExitCode})", run.Stdout, null);
                 if (!root.TryGetProperty("structured_output", out var so) || so.ValueKind != JsonValueKind.Object)
                     return Audit(packetId, started, "failed", verdict, removedNote + "no structured_output in claude result (declined or schema not met)", run.Stdout, null);
+                // The result must answer the packet that was run; web content must not redirect it to another market.
+                var answered = so.TryGetProperty("packet_id", out var pid) && pid.ValueKind == JsonValueKind.String ? pid.GetString() : null;
+                var ticker = so.TryGetProperty("ticker", out var tk) && tk.ValueKind == JsonValueKind.String ? tk.GetString() : null;
+                if (answered != packet.PacketId || ticker != packet.Ticker)
+                    return Audit(packetId, started, "failed", verdict,
+                        removedNote + $"result answers packet '{answered}' / ticker '{ticker}', not the packet that was run", run.Stdout, null);
                 structured = so.GetRawText();
             }
             catch (JsonException)
@@ -93,6 +118,40 @@ public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunne
         {
             try { Directory.Delete(workDir, recursive: true); } catch (IOException) { }
         }
+    }
+
+    /// <summary>User settings and managed settings files Claude Code reads on this OS. Missing files are skipped.</summary>
+    internal IEnumerable<SettingsFile> SettingsFiles(IReadOnlyDictionary<string, string> env)
+    {
+        var home = env.GetValueOrDefault("HOME") ?? env.GetValueOrDefault("USERPROFILE");
+        var configDir = env.GetValueOrDefault("CLAUDE_CONFIG_DIR") ?? (home is null ? null : Path.Combine(home, ".claude"));
+        if (configDir is null)
+        {
+            yield return new SettingsFile("~/.claude/settings.json", null, "HOME is not set, so user settings cannot be checked");
+            yield break;
+        }
+        var managed = _o.ManagedSettingsDir
+                      ?? (OperatingSystem.IsMacOS() ? "/Library/Application Support/ClaudeCode"
+                          : OperatingSystem.IsWindows() ? @"C:\Program Files\ClaudeCode"
+                          : "/etc/claude-code");
+        var candidates = new List<string> { Path.Combine(configDir, "settings.json"), Path.Combine(managed, "managed-settings.json") };
+        var dropIns = Path.Combine(managed, "managed-settings.d");
+        if (Directory.Exists(dropIns))
+            candidates.AddRange(Directory.GetFiles(dropIns, "*.json").Where(f => !Path.GetFileName(f).StartsWith('.')).Order(StringComparer.Ordinal));
+        foreach (var path in candidates.Where(File.Exists))
+        {
+            string? content = null, error = null;
+            try { content = File.ReadAllText(path); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { error = e.Message; }
+            yield return new SettingsFile(path, content, error);
+        }
+    }
+
+    private static bool InsideGitRepository(string dir)
+    {
+        for (var d = new DirectoryInfo(dir); d is not null; d = d.Parent)
+            if (Directory.Exists(Path.Combine(d.FullName, ".git")) || File.Exists(Path.Combine(d.FullName, ".git"))) return true;
+        return false;
     }
 
     /// <summary>
