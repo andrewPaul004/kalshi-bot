@@ -516,6 +516,76 @@ public static class Schema
             floor_strike = (SELECT CAST(json_extract(r.body, '$.market.floor_strike') AS TEXT)   FROM raw_responses r WHERE r.id = market_snapshots.raw_market_id AND json_valid(r.body)),
             cap_strike   = (SELECT CAST(json_extract(r.body, '$.market.cap_strike')   AS TEXT)   FROM raw_responses r WHERE r.id = market_snapshots.raw_market_id AND json_valid(r.body));
         """),
+        (7, """
+        -- Truth data for Phase 3 (docs/PHASE3_PLAN.md W2): what each market day actually settled on, and the NWS climate
+        -- report high used to cross-check it. Lives in its own database (origin 'archive:truth'), never in a recording DB.
+        CREATE TABLE truth_runs (
+            id          INTEGER PRIMARY KEY,
+            started_at  TEXT NOT NULL,
+            finished_at TEXT,
+            status      TEXT NOT NULL CHECK (status IN ('running','completed','partial','failed','abandoned')),
+            source      TEXT NOT NULL CHECK (source IN ('kalshi','iem-cli')),
+            data_origin TEXT NOT NULL,
+            scope       TEXT NOT NULL,
+            detail      TEXT
+        );
+
+        CREATE TABLE truth_raw (
+            id            INTEGER PRIMARY KEY,
+            run_id        INTEGER NOT NULL REFERENCES truth_runs(id),
+            url           TEXT NOT NULL,
+            http_status   INTEGER NOT NULL,
+            requested_at  TEXT NOT NULL,
+            received_at   TEXT NOT NULL,
+            server_date   TEXT,
+            body_sha256   TEXT NOT NULL,
+            body          TEXT NOT NULL
+        );
+        CREATE TRIGGER truth_raw_no_update BEFORE UPDATE ON truth_raw BEGIN SELECT RAISE(ABORT, 'truth_raw is append-only'); END;
+        CREATE TRIGGER truth_raw_no_delete BEFORE DELETE ON truth_raw BEGIN SELECT RAISE(ABORT, 'truth_raw is append-only'); END;
+
+        -- One row per event per distinct vintage. A revised value or regime appends a new row; the latest id is current.
+        -- raw_id is the first fetched page that held a market of the event. expiration_value is NULL only for 'conflict'.
+        CREATE TABLE settled_values (
+            id                   INTEGER PRIMARY KEY,
+            run_id               INTEGER NOT NULL REFERENCES truth_runs(id),
+            raw_id               INTEGER NOT NULL REFERENCES truth_raw(id),
+            data_origin          TEXT NOT NULL,
+            series_ticker        TEXT NOT NULL,
+            event_ticker         TEXT NOT NULL,
+            climate_date         TEXT NOT NULL,
+            expiration_value     TEXT,
+            regime               TEXT NOT NULL,
+            markets_seen         INTEGER NOT NULL,
+            markets_checked      INTEGER NOT NULL,
+            markets_inconsistent INTEGER NOT NULL,
+            status               TEXT NOT NULL CHECK (status IN ('ok','conflict','inconsistent')),
+            received_at          TEXT NOT NULL,
+            CHECK ((status = 'conflict') = (expiration_value IS NULL)),
+            UNIQUE (run_id, event_ticker)
+        );
+        CREATE INDEX ix_settled_values_event ON settled_values (event_ticker, id);
+        CREATE INDEX ix_settled_values_date  ON settled_values (climate_date);
+        CREATE TRIGGER settled_values_no_update BEFORE UPDATE ON settled_values BEGIN SELECT RAISE(ABORT, 'settled_values is append-only'); END;
+        CREATE TRIGGER settled_values_no_delete BEFORE DELETE ON settled_values BEGIN SELECT RAISE(ABORT, 'settled_values is append-only'); END;
+
+        -- NWS climate report daily highs (IEM archive of the CLI products). Appended per vintage like settled_values.
+        CREATE TABLE cli_highs (
+            id           INTEGER PRIMARY KEY,
+            run_id       INTEGER NOT NULL REFERENCES truth_runs(id),
+            raw_id       INTEGER NOT NULL REFERENCES truth_raw(id),
+            data_origin  TEXT NOT NULL,
+            station      TEXT NOT NULL,
+            climate_date TEXT NOT NULL,
+            high         TEXT NOT NULL,
+            product      TEXT,
+            received_at  TEXT NOT NULL,
+            UNIQUE (run_id, station, climate_date)
+        );
+        CREATE INDEX ix_cli_highs_day ON cli_highs (station, climate_date, id);
+        CREATE TRIGGER cli_highs_no_update BEFORE UPDATE ON cli_highs BEGIN SELECT RAISE(ABORT, 'cli_highs is append-only'); END;
+        CREATE TRIGGER cli_highs_no_delete BEFORE DELETE ON cli_highs BEGIN SELECT RAISE(ABORT, 'cli_highs is append-only'); END;
+        """),
     ];
 
     public static int LatestVersion => Migrations[^1].Version;

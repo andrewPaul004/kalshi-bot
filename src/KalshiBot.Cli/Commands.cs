@@ -33,7 +33,12 @@ public static class Commands
         forecast collect [--location KNYC] [--min-interval MINUTES] [--fixtures DIR]
                                       store the current NWS point forecast (evidence; read-only, no key)
         forecast list [--location KNYC]              daytime-high forecast vintages per date
-        markets                       latest snapshot per market
+        truth collect-kalshi [--series KXHIGHNY]     what settled markets resolved on (live + historical), into data/truth.db
+        truth collect-cli [--station KNYC] [--from-year 2010] [--to-year YEAR]
+                                      NWS climate-report daily highs from the IEM archive (cross-check and pre-2021 proxy)
+        truth report [--station KNYC]                Kalshi vs NWS agreement, flagged and missing days, scoring series size
+                                      (truth commands default to --db data/truth.db, never the recording database)
+        markets                      latest snapshot per market
         rules TICKER                  rules versions recorded for a market
 
         research export TICKER [--out DIR]          packet JSON + paste-ready prompt (default data/research)
@@ -60,8 +65,10 @@ public static class Commands
     {
         var a = new Args(argv, Flags);
         if (a.Positionals.Count == 0 || a.Positionals[0] is "help" or "-h" or "--help") { Console.WriteLine(Usage); return 0; }
-        var dbPath = a.Opt("db") ?? Environment.GetEnvironmentVariable("KALSHIBOT_DB") ?? Path.Combine("data", "kalshibot.db");
         var cmd = a.Positionals[0];
+        // Truth data has its own database (spec 8.1); $KALSHIBOT_DB, which points at the recording database, is ignored for it.
+        var dbPath = a.Opt("db") ?? (cmd == "truth" ? Path.Combine("data", "truth.db")
+            : Environment.GetEnvironmentVariable("KALSHIBOT_DB") ?? Path.Combine("data", "kalshibot.db"));
         var sub = a.Positionals.Count > 1 ? a.Positionals[1] : null;
 
         if (cmd is "replay" or "demo") return Demo.Run(a);
@@ -72,6 +79,7 @@ public static class Commands
             case "watch": return Watch(db, a, sub);
             case "discover": return await Discover(a);
             case "forecast": return await Forecast(db, a, sub);
+            case "truth": return await Truth(db, a, sub);
             case "record": return await Record(db, a);
             case "markets": a.EnsureAllUsed(); return Markets(db);
             case "rules": a.EnsureAllUsed(); return Rules(db, a.Pos(1, "TICKER"));
@@ -239,6 +247,45 @@ public static class Commands
                 return 0;
             }
             default: throw new UsageException($"Unknown forecast subcommand '{sub}'.");
+        }
+    }
+
+    private static async Task<int> Truth(Db db, Args a, string? sub)
+    {
+        switch (sub)
+        {
+            case "collect-kalshi":
+            {
+                var series = a.Opt("series") ?? "KXHIGHNY";
+                a.EnsureAllUsed();
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+                var r = await new KalshiBot.Core.Truth.KalshiTruthCollector(db, new KalshiPublicClient(http, KalshiEndpoint.Production, Clock), Clock).CollectAsync(series);
+                Console.WriteLine($"truth run #{r.RunId} kalshi {series}: {r.Status}, {r.Pages} page(s), {r.MarketsSeen} market(s)");
+                Console.WriteLine($"  events with a settled value: {r.EventsWithValue} ({r.NewVintages} new vintage(s), {r.Unchanged} unchanged)");
+                Console.WriteLine($"  flagged: {r.Conflicts} conflict, {r.Inconsistent} inconsistent; {r.NoValue} event(s) with no usable settled value");
+                foreach (var e in r.Errors) Console.WriteLine($"  ! {e}");
+                return r.Status == "completed" ? 0 : 1;
+            }
+            case "collect-cli":
+            {
+                var station = a.Opt("station") ?? "KNYC";
+                var from = int.Parse(a.Opt("from-year") ?? "2010", CultureInfo.InvariantCulture);
+                var to = int.Parse(a.Opt("to-year") ?? Clock.GetUtcNow().Year.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+                a.EnsureAllUsed();
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+                var r = await new KalshiBot.Core.Truth.IemCliCollector(db, http, Clock).CollectAsync(station, from, to);
+                Console.WriteLine($"truth run #{r.RunId} iem-cli {station} {from}-{to}: {r.Status}, {r.Years} year(s), {r.Days} day(s) ({r.NewVintages} new vintage(s), {r.Unchanged} unchanged)");
+                foreach (var e in r.Errors) Console.WriteLine($"  ! {e}");
+                return r.Status == "completed" ? 0 : 1;
+            }
+            case "report":
+            {
+                var station = a.Opt("station") ?? "KNYC";
+                a.EnsureAllUsed();
+                Console.Write(KalshiBot.Core.Truth.TruthStore.Report(db, station).ToText());
+                return 0;
+            }
+            default: throw new UsageException($"Unknown truth subcommand '{sub}'.");
         }
     }
 

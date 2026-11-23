@@ -93,3 +93,9 @@ scoped to this repository. No third-party code was copied, so the §10 per-copy 
   (`between` inclusive, `less` = below cap, `greater` = above floor) and abstains (null) on anything unrecognised.
   Rules-text fallback covers strike-less markets. Verified on 8,606 real markets. The settlement source named in the
   rules changed over time (NWS until 2026-08-13, then The Weather Company); W2 will record the regime per day.
+- **2026-11-23 W2 done: truth data.** Migration 7 and `kb truth` keep what each market day settled on (Kalshi
+  `expiration_value`, live and historical) and the NWS climate-report high from IEM, in their own append-only
+  `data/truth.db` (origin `archive:truth`; recording databases refuse truth writes and the reverse). Kalshi's value is
+  authoritative; the NWS high is a proxy only before Kalshi's first day (2021-08-06). Days Kalshi never stated, or that
+  are flagged (conflict or inconsistent), are excluded, not filled. Real run: 1,863 days, 0 flagged, 1,860 of 1,861
+  agree with the NWS high. A parser bug (padded values like " 88") first showed as 3 false conflicts; fixed with a test.

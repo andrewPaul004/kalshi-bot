@@ -119,7 +119,17 @@ spec's S7–S9 and S16 pages could not be re-read here.
   - Settlement source in the rules text changed over time: unnamed (2021-08 to 2022-03), NWS "Daily Climate Report"
     (2022-03 to 2025-03), NWS "Climatological Report (Daily)" (2025-03 to 2026-08-13), then The Weather Company (events
     from 2026-08-14). Older markets live under the `HIGHNY-` series prefix; newer ones `KXHIGHNY-`.
-  - `expiration_value` is the settled value as a decimal string (e.g. "61.00"). It is empty on many 2022-2024 markets.
+  - `expiration_value` is the settled value as a decimal string (e.g. "61.00"). It is empty on many 2022-2024 markets,
+    and within one finalized event some markets carry it while others leave it empty. 2021 values arrive padded
+    (" 88") or without decimals ("87"). No event has two different non-empty values.
+- **Settled markets (verified 2026-11-23):** `GET /markets?series_ticker=S&status=settled&limit=1000` returns recent
+  settled markets (about 414, since 2026-09-24). Older ones are on `GET /historical/markets?series_ticker=S&limit=1000`
+  (cursor-paged; `GET /historical/cutoff` gives the boundary). Both work against `external-api.kalshi.com`. Querying
+  `KXHIGHNY` also returns the older `HIGHNY-` events. Hourly bid/ask candlesticks:
+  `/historical/markets/{ticker}/candlesticks` (older) and `/series/{series}/markets/{ticker}/candlesticks` (recent).
+- **IEM NWS climate reports (verified 2026-11-23):** `GET https://mesonet.agron.iastate.edu/json/cli.py?station=KNYC&year=Y`
+  returns one row per climate date (`valid`, `high`, `product`, ...); about 366 rows a year, from at least 2010.
+  IEM GFS MOS: `/api/1/mos.json?station=KNYC&model=GFS&runtime=...` (2010 to now). NBS/NBE stopped on 2026-05-04.
 - **Tick size:** `price_ranges[{start,end,step}]` per market. The risk engine checks limits against it.
 - **Fees (verified 2026-11-23):** source is the Kalshi Fee Schedule PDF, "Last updated and effective: July 7, 2026"
   (sha256 `c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601`), a copy provided by the operator.

@@ -59,6 +59,15 @@ public sealed class KalshiPublicClient(HttpClient http, KalshiEndpoint endpoint,
         GetAsync($"/markets?series_ticker={Esc(seriesTicker)}&status=open&limit=200" +
                  (string.IsNullOrEmpty(cursor) ? "" : $"&cursor={Esc(cursor)}"), ct);
 
+    /// <summary>
+    /// Settled markets of a series. Kalshi keeps recent settled markets on <c>/markets</c> and older ones on
+    /// <c>/historical/markets</c> (see <c>/historical/cutoff</c>); a full history needs both.
+    /// </summary>
+    public Task<RawHttpResponse> ListSettledMarketsAsync(string seriesTicker, string? cursor, bool historical, CancellationToken ct) =>
+        GetAsync((historical ? "/historical/markets" : "/markets") + $"?series_ticker={Esc(seriesTicker)}" +
+                 (historical ? "" : "&status=settled") + "&limit=1000" +
+                 (string.IsNullOrEmpty(cursor) ? "" : $"&cursor={Esc(cursor)}"), ct);
+
     private static string Esc(string s) => Uri.EscapeDataString(s);
 
     private async Task<RawHttpResponse> GetAsync(string relative, CancellationToken ct)

@@ -64,6 +64,7 @@ src/KalshiBot.Core/
   Recording/  Recorder (+ DatabaseOrigin), MarketStore, Watchlist
   Trading/    IForecastModel, IStrategy/EdgeThresholdStrategy, RiskEngine, FeeSchedules, PaperBroker, PaperLedger, PaperEngine
   Research/   PacketExporter, ResearchImporter (schema-validated), BillingGuard, ClaudeResearchRunner, JsonSchemaSubset
+  Truth/      SettlementRegime, TruthParse, KalshiTruthCollector, IemCliCollector, TruthStore (own database, data/truth.db)
   Status/     StatusReport, FixtureReplay
 schemas/research-record.schema.json   research contract (spec §4.5), embedded in Core
 fixtures/synthetic/                   hand-written, clearly synthetic Kalshi-shaped JSON and fixture model

@@ -175,8 +175,8 @@ models, and a test that fails without the change.
 | # | Item | Notes |
 |---|---|---|
 | W1 | **Done 2026-11-23.** Parse `strike_type` / `floor_strike` / `cap_strike` into the market store (migration 6, backfilled from stored raw bodies), with `OutcomeBucket` (`FromStrikes`, `FromRules`, `Resolve`) and `MarketSnapshot.Bucket` | V3. 34 tests, five mutations caught. Edge semantics and rules-text fallback checked against 8,606 real markets (INTEGRATION_NOTES). |
-| W2 | Truth collector: Kalshi `expiration_value` per settled event (live and `/historical`), with the IEM CLI high stored beside it as a cross-check. A day where they differ is flagged and reported (known: 2025-06-18), never silently patched. Kalshi's value wins. | V1/V2 (2a). Also covers the 72 missing days: they are excluded from scoring and listed. |
-| W3 | Archive importers for IEM **GFS MOS** (KNYC, 12Z cycle, 2010+), IEM CLI history, and Kalshi hourly candlesticks, into separate `archive:iem` / `archive:kalshi` databases | V5/V6/V7. Raw bodies plus hashes, like the recorder. NBM is not imported (stale on IEM). |
+| W2 | **Done 2026-11-23.** `kb truth collect-kalshi`, `collect-cli`, `report` into its own `data/truth.db` (origin `archive:truth`, migration 7, append-only). Kalshi `expiration_value` per settled event (live and `/historical`), the IEM NWS climate-report high beside it as a cross-check, and the settlement regime per day. A differing day is flagged and reported, never patched. `TruthStore.Resolve` gives the scoring series. | V1/V2 (2a). 25 tests, 11 mutations caught. Real run below. |
+| W3 | Archive importers for IEM **GFS MOS** (KNYC, 12Z cycle, 2010+) and Kalshi hourly candlesticks, into archive databases separate from `truth.db` | V5/V7. Raw bodies plus hashes, like the recorder. NBM is not imported (stale on IEM). IEM climate-report history is already collected by W2. |
 | W4 | Evidence-aware forecast interface: change `IForecastModel.Forecast(MarketSnapshot)` to also take a point-in-time evidence view (forecast vintages as of decision time) | Test: a vintage received after the decision time must not change the forecast. |
 | W5 | `kb model fit nyc-high-residual` writes the frozen parameter JSON and prints its hash; `ResidualForecastModel` loads it | Deterministic: the same archive gives byte-identical parameters. |
 | W6 | `kb eval retro` runs Stage A: walk-forward, baselines, bootstrap, kill gate A verdict | Seed and inputs recorded, so the report reproduces. |
@@ -185,6 +185,21 @@ models, and a test that fails without the change.
 | W9 | `docs/PHASE3_PROTOCOL.md`: the frozen copy of §5, with its hash in `docs/PLAN.md` | Done before the first Stage B decision. |
 
 V5 resolved to GFS MOS (2a), so W3, W5 and W6 are unblocked.
+
+**W2 result on real data (2026-11-23, `kb truth report`):**
+
+| Measure | Value |
+|---|---|
+| Kalshi settled event-days | 1,863 (2021-08-06 to 2026-11-22): 1,863 ok, 0 conflict, 0 inconsistent, from 9,976 markets |
+| Internal consistency | Every settled yes/no result agrees with its event's value under the strike edges |
+| NWS climate-report highs (KNYC, 2010 to 2026) | 6,166 days |
+| Kalshi vs NWS high | 1,860 of 1,861 agree. Only 2025-06-18 differs (Kalshi 84, NWS 83) |
+| By regime | Weather Company 101/101, NWS Climatological Report 456/457, NWS Daily Climate Report 1,096/1,096, unnamed 207/207 |
+| Days in the Kalshi range with no settled value | 72, excluded from scoring (68 events settled with no stated value; the rest never listed) |
+| Scoring truth series | 6,096 days = 1,863 Kalshi + 4,233 NWS-high proxy (2010-01-01 to 2021-08-05 only) |
+
+The 101 Weather Company days are too few to say the two sources never diverge; they say the Weather Company value is not
+visibly different from the NWS high so far. Stage A will report that period on its own.
 
 ## 7. Timeline
 
