@@ -86,7 +86,8 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
 2. **NWS forecast collector: built** (`kb forecast collect` / `kb forecast list`; also hourly from `record-scheduled.cmd`).
    It stores Central Park point-forecast vintages with NWS publication time and our retrieval time kept separate.
    Field names follow the NWS API docs but were unverified against live responses until the first run on the operator's machine.
-3. **Next build:** measure NWS day-ahead high-temperature error from historical archives (IEM). Then freeze a written
-   Phase 3 evaluation protocol before any model is scored.
+3. **Next build:** follow `docs/PHASE3_PLAN.md`. First verify V1–V8 on the operator's machine (settlement source, bucket
+   edges, IEM archive availability). Then W1 (strike parsing), W2 (CLI truth collector), and W4 (point-in-time evidence
+   interface), which are needed whatever the archive check shows.
 4. Optional: allow `external-api.kalshi.com`, `api.weather.gov`, and `mesonet.agron.iastate.edu` in the cloud
    environment's network settings, so collectors can be verified against live data from here.
