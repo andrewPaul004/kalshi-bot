@@ -84,3 +84,7 @@ scoped to this repository. No third-party code was copied, so the §10 per-copy 
   positive simulated P&L. A retrospective walk-forward kill gate comes before any prospective months. Then 90 event-days
   prospective, at most one position per event-day. Gradient-boosted models are deferred until M1 passes.
 - **2026-11-23 Phase 3 observation budget.** Operator accepts 3–4 months of prospective paper (Stage B) if kill gate A passes.
+- **2026-11-23 Phase 3 facts verified** (`docs/PHASE3_PLAN.md` §2a). KXHIGHNY settles on the Weather Company value for
+  CLINYC; Kalshi's `expiration_value` is the truth, and the NWS CLI high matches it on 1,860 of 1,861 days. Kalshi history
+  holds 1,863 settled event-days from 2021-08-06, with hourly bid/ask candlesticks. IEM NBM text stopped on 2026-05-04, so
+  M1 takes GFS MOS (12Z) as its input. Still unverified: GFS MOS publication lag, `HIGHNY`/`KXHIGHNY` equivalence, tail depth.

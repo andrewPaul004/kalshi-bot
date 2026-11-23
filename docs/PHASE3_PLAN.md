@@ -40,15 +40,36 @@ If V5 fails (no archived forecast with issue times), the model input changes to 
 prospectively. The retrospective stage (§5.2) then shrinks to the truth-only climatology baseline, and the timeline
 grows by the months needed to collect training data. Record that decision; do not reconstruct forecasts.
 
+### 2a. Verification results (2026-11-23, operator's Windows machine)
+
+Raw probes were read-only GETs, kept outside the repo. Settled-market counts below come from Kalshi's live and
+`/historical` partitions (cutoff 2026-09-24).
+
+| # | Result | Consequence |
+|---|---|---|
+| V1 | **Settles on The Weather Company value** for "New York City (CLINYC)", per `rules_primary`, `rules_secondary` and the series' `settlement_sources` (weather.com/kalshi). **Not** the NWS CLI report. Kalshi publishes the settled value as `expiration_value` on every finalized market. | The authoritative truth is Kalshi's `expiration_value`. W2 changes (§6). |
+| V1/V2 cross-check | Across **1,861 days** with both values, Kalshi's settled value equals the NWS CLI high for Central Park on **1,860 (99.9%)**. One day differs: 2025-06-18, Kalshi 84 vs CLI 83. | CLI is a validated truth proxy for **pre-Kalshi years** (IEM CLI from 2010 or earlier), with a known ~0.1% disagreement. The CLI day convention matches Kalshi's in practice, so V2 is settled empirically. |
+| V3 | Whole °F. Six markets per event. `between`: `floor_strike`..`cap_strike` **inclusive**, 2°F wide (`B49.5` = 49–50). `less`: `cap_strike=49` means **≤ 48** (yes_sub_title "48° or below"). `greater`: `floor_strike=56` means **≥ 57** ("57° or above"). Pre-2022 markets have no `strike_type`. | W1 must parse `strike_type`/`floor_strike`/`cap_strike`, and fall back to ticker and rules text for pre-2022 markets. |
+| V4 | A day's markets open at **15:00Z on D-1** (10:00 ET in winter). Spreads at the recorded mid-buckets are about 1¢, with tight books. D-1 15:00 ET is about 5 hours after listing. | D-1 15:00 ET stays the decision time. Depth on thin tail buckets is still to be checked from the recorder history. |
+| V5 | IEM GFS MOS for KNYC is available from **2010 to the present** (cycles 00/06/12/18Z, `n_x` = daily max). IEM NBM text is **not usable**: NBS covers about 2020 to **2026-05-04**, NBE about 2021 onward, and both are stale since May 2026. | NBM cannot be the live input. **M1 uses GFS MOS** (12Z cycle) as its forecast input, historical and live. M2's NBM features are dropped. See §3 and §4. |
+| V6 | IEM CLI history available (366 rows/yr, fetched for 2021–2026; `high`, `valid`, product id `CLINYC`). | Truth for the pre-Kalshi training years. |
+| V7 | `/historical/markets/{ticker}/candlesticks` (and `/series/.../candlesticks` for the live partition) return **hourly `yes_bid`/`yes_ask` OHLC** for 2021–2026. **Kalshi history: 1,863 settled event-days, 2021-08-06 to 2026-11-22, 72 missing days** (including 2025-10-31 to at least 2025-11-05). Older tickers use the `HIGHNY-` prefix, newer ones `KXHIGHNY-`. | Kill gate A's market comparison is possible. Quotes are hourly closes, not depth. Probability comparison only, never P&L. |
+| V8 | `kb forecast collect` works against the live NWS API. 14 daytime-high vintages stored for Nov 23–29 (e.g. Nov 24 = 49°F), with `updateTime` and our retrieval time kept apart. | Collector field names are confirmed. Remaining caveat: NWS `updateTime` stayed `06:19Z` across two retrievals 1 hour apart, as expected for a 12-hour product. |
+
+**Not yet verified:** the publication lag of each GFS MOS cycle (the plan assumes the 12Z product is out before
+19:00Z on D-1, 3+ hours before the decision time); whether the `HIGHNY-` and `KXHIGHNY-` series are the same contract
+economically (same station and source); and bid/ask depth on the thin tail buckets.
+
 ## 3. Data
 
 Each source gets its own database file (spec §8.1, one data origin per database). Archive data is not production data.
 
 | Source | Use | Origin label | Times stored |
 |---|---|---|---|
-| IEM NBM/MOS for KNYC (V5) | Model input, historical and live | `archive:iem` (historical) / `production` (live) | issue time, valid date, retrieval time |
+| IEM GFS MOS for KNYC (V5), 12Z cycle | Model input, historical (2010+) and live | `archive:iem` (historical) / `production` (live) | model runtime, valid time, retrieval time |
 | NWS point forecast (`kb forecast collect`) | Secondary feature and baseline; prospective only | `production` | `update_time`, `generated_at`, `received_at` (exists) |
-| CLI daily max (V1, V6) | Truth | `archive:iem` / `production` | report issue time, climate date, retrieval time |
+| Kalshi `expiration_value` on settled markets (V1) | Authoritative truth, 2021-08 onward and live | `production` / `archive:kalshi` | settlement time, retrieval time |
+| IEM CLI daily max (V6) | Truth for pre-Kalshi training years, and a cross-check against Kalshi's value | `archive:iem` | report product id, climate date, retrieval time |
 | Kalshi market and book (`kb record`) | Market baseline, paper fills, settlement | `production` (exists) | observed time (exists) |
 | Kalshi historical candles/trades (V7) | Retrospective market baseline only; never fills | `archive:kalshi` | period end, retrieval time |
 
@@ -64,14 +85,16 @@ converts to `decimal` and validates the result (spec §5.4).
 - **B0 Climatology.** Empirical distribution of the CLI max for ±15 days around the calendar date, 30 years. Baseline only.
 - **B1 Naive forecast.** Normal(forecast, σ) with one global σ fitted on training years. Baseline only.
 - **M1 `nyc-high-residual/1` (candidate).**
+  - Input: the GFS MOS 12Z `n_x` for the target date (V5). Train on 2010 to the start of the test year, truth from the
+    CLI for years before 2021-08 and from Kalshi's `expiration_value` afterwards.
   - `T_max ~ forecast + bias(season, cycle) + ε`, with ε drawn from the empirical residuals for the same season
     window and issue cycle, kernel-smoothed.
   - Bucket probability = P(round(T) ∈ [floor, cap]) under the bucket edges from V3.
   - `Uncertainty` = the 90th-percentile absolute calibration error of the bucket probability, measured on the
     training walk-forward. It is reported, not hand-picked (spec §5.4).
   - About 3–6 parameters, fit on roughly 1,500+ daily observations. A model this small cannot overfit them.
-- **M2 (later, only if M1 passes):** add features such as NBM spread, NWS-vs-NBM disagreement, or wind/cloud, using
-  a tree model. M2 is a new version with its own frozen protocol. M1 results are not reused as M2's out-of-sample
+- **M2 (later, only if M1 passes):** add features such as GFS MOS spread across cycles, NWS-vs-MOS disagreement, or
+  wind/cloud, using a tree model. NBM features are out unless a live NBM source is found (V5). M2 is a new version with its own frozen protocol. M1 results are not reused as M2's out-of-sample
   evidence (spec §8.2).
 
 Market-implied baseline: for each event, the yes-mid of every bucket at decision time. Report both raw mids and mids
@@ -146,8 +169,8 @@ models, and a test that fails without the change.
 | # | Item | Notes |
 |---|---|---|
 | W1 | Parse `strike_type` / `floor_strike` / `cap_strike` into the market store via a new migration, read from stored raw bodies | V3. Test against a recorded KXHIGHNY body. |
-| W2 | Truth collector: CLI daily max for Central Park, with report issue time and climate date. Reconcile against Kalshi `result` at settlement. | V1/V2. A mismatch blocks scoring for that day and is reported, never silently patched. |
-| W3 | Archive importers for IEM NBM/MOS and CLI history, into a separate `archive:iem` database | V5/V6. Raw bodies plus hashes, like the recorder. |
+| W2 | Truth collector: Kalshi `expiration_value` per settled event (live and `/historical`), with the IEM CLI high stored beside it as a cross-check. A day where they differ is flagged and reported (known: 2025-06-18), never silently patched. Kalshi's value wins. | V1/V2 (2a). Also covers the 72 missing days: they are excluded from scoring and listed. |
+| W3 | Archive importers for IEM **GFS MOS** (KNYC, 12Z cycle, 2010+), IEM CLI history, and Kalshi hourly candlesticks, into separate `archive:iem` / `archive:kalshi` databases | V5/V6/V7. Raw bodies plus hashes, like the recorder. NBM is not imported (stale on IEM). |
 | W4 | Evidence-aware forecast interface: change `IForecastModel.Forecast(MarketSnapshot)` to also take a point-in-time evidence view (forecast vintages as of decision time) | Test: a vintage received after the decision time must not change the forecast. |
 | W5 | `kb model fit nyc-high-residual` writes the frozen parameter JSON and prints its hash; `ResidualForecastModel` loads it | Deterministic: the same archive gives byte-identical parameters. |
 | W6 | `kb eval retro` runs Stage A: walk-forward, baselines, bootstrap, kill gate A verdict | Seed and inputs recorded, so the report reproduces. |
@@ -155,7 +178,7 @@ models, and a test that fails without the change.
 | W8 | `kb eval prospective` runs Stage B: the metrics in §5.4 and the pass/fail/insufficient verdict at N | Refuses a verdict before N. |
 | W9 | `docs/PHASE3_PROTOCOL.md`: the frozen copy of §5, with its hash in `docs/PLAN.md` | Done before the first Stage B decision. |
 
-W1, W2 and W4 are useful whatever V5 shows. W3, W5 and W6 depend on V5.
+V5 resolved to GFS MOS (2a), so W3, W5 and W6 are unblocked.
 
 ## 7. Timeline
 

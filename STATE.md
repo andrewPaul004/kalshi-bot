@@ -86,8 +86,9 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
 2. **NWS forecast collector: built** (`kb forecast collect` / `kb forecast list`; also hourly from `record-scheduled.cmd`).
    It stores Central Park point-forecast vintages with NWS publication time and our retrieval time kept separate.
    Field names follow the NWS API docs but were unverified against live responses until the first run on the operator's machine.
-3. **Next build:** follow `docs/PHASE3_PLAN.md`. First verify V1–V8 on the operator's machine (settlement source, bucket
-   edges, IEM archive availability). Then W1 (strike parsing), W2 (CLI truth collector), and W4 (point-in-time evidence
-   interface), which are needed whatever the archive check shows.
+3. **Next build:** follow `docs/PHASE3_PLAN.md`. V1–V8 were verified on 2026-11-23 (§2a there). Settlement is the Weather
+   Company value, which matches the NWS CLI high on 99.9% of 1,861 days. The model input is IEM GFS MOS, because IEM's NBM
+   feed stopped on 2026-05-04. Build order: W1 (strike parsing), W2 (truth: Kalshi `expiration_value` plus CLI cross-check),
+   W3 (archive importers), then W4 (point-in-time evidence interface).
 4. Optional: allow `external-api.kalshi.com`, `api.weather.gov`, and `mesonet.agron.iastate.edu` in the cloud
    environment's network settings, so collectors can be verified against live data from here.
