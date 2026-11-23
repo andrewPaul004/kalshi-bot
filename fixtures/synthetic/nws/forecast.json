@@ -1,0 +1,16 @@
+{
+  "fixture_note": "SYNTHETIC: hand-written in the shape documented for api.weather.gov gridpoint forecasts; values are made up.",
+  "properties": {
+    "units": "us",
+    "generatedAt": "2099-12-30T15:44:16+00:00",
+    "updateTime": "2099-12-30T08:13:42+00:00",
+    "periods": [
+      { "number": 1, "name": "This Afternoon", "startTime": "2099-12-30T10:00:00-05:00", "endTime": "2099-12-30T18:00:00-05:00",
+        "isDaytime": true, "temperature": 47, "temperatureUnit": "F", "shortForecast": "Sunny" },
+      { "number": 2, "name": "Tonight", "startTime": "2099-12-30T18:00:00-05:00", "endTime": "2099-12-31T06:00:00-05:00",
+        "isDaytime": false, "temperature": 38, "temperatureUnit": "F", "shortForecast": "Clear" },
+      { "number": 3, "name": "Wednesday", "startTime": "2099-12-31T06:00:00-05:00", "endTime": "2099-12-31T18:00:00-05:00",
+        "isDaytime": true, "temperature": 52, "temperatureUnit": "F", "shortForecast": "Partly Sunny" }
+    ]
+  }
+}

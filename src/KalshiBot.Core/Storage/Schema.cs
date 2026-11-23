@@ -452,6 +452,58 @@ public static class Schema
             added_at      TEXT NOT NULL
         );
         """),
+        (5, """
+        -- External evidence (spec 3.1 evidence collector): NWS point forecasts with publication and retrieval times kept
+        -- separate (spec 8.2), so later evaluation uses only what was available at decision time.
+        CREATE TABLE forecast_runs (
+            id           INTEGER PRIMARY KEY,
+            started_at   TEXT NOT NULL,
+            finished_at  TEXT,
+            status       TEXT NOT NULL CHECK (status IN ('running','completed','failed')),
+            source       TEXT NOT NULL,
+            data_origin  TEXT NOT NULL,
+            location     TEXT NOT NULL,
+            detail       TEXT
+        );
+
+        CREATE TABLE forecast_raw (
+            id            INTEGER PRIMARY KEY,
+            run_id        INTEGER NOT NULL REFERENCES forecast_runs(id),
+            url           TEXT NOT NULL,
+            http_status   INTEGER NOT NULL,
+            requested_at  TEXT NOT NULL,
+            received_at   TEXT NOT NULL,
+            server_date   TEXT,
+            body_sha256   TEXT NOT NULL,
+            body          TEXT NOT NULL
+        );
+        CREATE TRIGGER forecast_raw_append_only_u BEFORE UPDATE ON forecast_raw BEGIN SELECT RAISE(ABORT, 'forecast_raw is append-only'); END;
+        CREATE TRIGGER forecast_raw_append_only_d BEFORE DELETE ON forecast_raw BEGIN SELECT RAISE(ABORT, 'forecast_raw is append-only'); END;
+
+        -- One row per forecast period per retrieved vintage. update_time = NWS publication; received_at = our retrieval.
+        CREATE TABLE nws_forecast_periods (
+            id               INTEGER PRIMARY KEY,
+            run_id           INTEGER NOT NULL REFERENCES forecast_runs(id),
+            raw_id           INTEGER NOT NULL REFERENCES forecast_raw(id),
+            data_origin      TEXT NOT NULL,
+            location         TEXT NOT NULL,
+            grid             TEXT NOT NULL,
+            generated_at     TEXT,
+            update_time      TEXT,
+            received_at      TEXT NOT NULL,
+            period_number    INTEGER NOT NULL,
+            name             TEXT NOT NULL,
+            start_time       TEXT NOT NULL,
+            end_time         TEXT NOT NULL,
+            local_date       TEXT NOT NULL,
+            is_daytime       INTEGER NOT NULL,
+            temperature      INTEGER NOT NULL,
+            temperature_unit TEXT NOT NULL,
+            short_forecast   TEXT,
+            UNIQUE (raw_id, period_number)
+        );
+        CREATE INDEX ix_nws_periods_date ON nws_forecast_periods (location, local_date, is_daytime, received_at);
+        """),
     ];
 
     public static int LatestVersion => Migrations[^1].Version;

@@ -83,8 +83,10 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
    schtasks /Create /TN "kalshi-bot record" /SC MINUTE /MO 15 /TR "C:\Users\AndrewPaul\source\repos\Personal\Kalshi-Trader\kalshi-bot\record-scheduled.cmd" /F
    ```
    After Nov 24's market settles (about 8 AM ET Nov 25), run `.\kb.cmd research score` to score the first two records.
-2. **Next build: the NWS forecast collector** (spec 3.1 evidence collector). It records NWS point-forecast vintages for
-   Central Park with their issue times. Then measure forecast error from historical archives and freeze a Phase 3
-   evaluation protocol before scoring any model.
-3. Optional: allow `external-api.kalshi.com`, `api.weather.gov`, and `mesonet.agron.iastate.edu` in the cloud
+2. **NWS forecast collector: built** (`kb forecast collect` / `kb forecast list`; also hourly from `record-scheduled.cmd`).
+   It stores Central Park point-forecast vintages with NWS publication time and our retrieval time kept separate.
+   Field names follow the NWS API docs but were unverified against live responses until the first run on the operator's machine.
+3. **Next build:** measure NWS day-ahead high-temperature error from historical archives (IEM). Then freeze a written
+   Phase 3 evaluation protocol before any model is scored.
+4. Optional: allow `external-api.kalshi.com`, `api.weather.gov`, and `mesonet.agron.iastate.edu` in the cloud
    environment's network settings, so collectors can be verified against live data from here.

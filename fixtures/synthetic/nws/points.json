@@ -1,0 +1,11 @@
+{
+  "fixture_note": "SYNTHETIC: hand-written in the shape documented for api.weather.gov /points; not an observed response.",
+  "properties": {
+    "gridId": "OKX",
+    "gridX": 33,
+    "gridY": 37,
+    "forecast": "https://api.weather.gov/gridpoints/OKX/33,37/forecast",
+    "forecastHourly": "https://api.weather.gov/gridpoints/OKX/33,37/forecast/hourly",
+    "timeZone": "America/New_York"
+  }
+}

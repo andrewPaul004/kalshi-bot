@@ -126,6 +126,18 @@ spec's S7–S9 and S16 pages could not be re-read here.
     never edit an existing one.
 - **Rate limits (unverified):** client pacing is 250 ms between requests, and 429/5xx retry up to 3 times honoring `Retry-After`.
 
+## NWS (api.weather.gov) — evidence for KXHIGHNY
+
+- Flow: `GET /points/40.7789,-73.9692` (Central Park, the CLINYC station), then `properties.forecast`, a
+  `/gridpoints/{office}/{x},{y}/forecast` URL. Only `https://api.weather.gov` URLs are followed.
+- Stored per period: `name`, `startTime`/`endTime` (local offset), `isDaytime`, `temperature`/`temperatureUnit`, and
+  `shortForecast`. The response's `updateTime` (publication) and `generatedAt` are stored separately from our retrieval
+  time (spec 8.2).
+- A User-Agent header is required, so a generic `kalshi-bot/0.4 (personal research; read-only)` is sent. No API key.
+- **Unverified here:** api.weather.gov is unreachable from the build environment. Field names follow the NWS API
+  documentation, the fixtures are hand-written to that shape, and raw bodies are always stored first. Confirm on the
+  first live run.
+
 ## Environment blockers (this cloud session)
 
 The network policy denies `chatgpt.com` (spec), `docs.kalshi.com`, `external-api.kalshi.com`, `api.elections.kalshi.com`,

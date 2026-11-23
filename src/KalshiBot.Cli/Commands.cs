@@ -30,6 +30,9 @@ public static class Commands
                [--fixtures DIR]       ...from SYNTHETIC fixture files instead (use a separate --db)
                [--ticker T]...        ...these tickers instead of the watchlist
                [--repeat N --interval SECONDS]
+        forecast collect [--location KNYC] [--min-interval MINUTES] [--fixtures DIR]
+                                      store the current NWS point forecast (evidence; read-only, no key)
+        forecast list [--location KNYC]              daytime-high forecast vintages per date
         markets                       latest snapshot per market
         rules TICKER                  rules versions recorded for a market
 
@@ -68,6 +71,7 @@ public static class Commands
         {
             case "watch": return Watch(db, a, sub);
             case "discover": return await Discover(a);
+            case "forecast": return await Forecast(db, a, sub);
             case "record": return await Record(db, a);
             case "markets": a.EnsureAllUsed(); return Markets(db);
             case "rules": a.EnsureAllUsed(); return Rules(db, a.Pos(1, "TICKER"));
@@ -195,6 +199,47 @@ public static class Commands
             if (s.Status == "failed") exit = 1;
         }
         return exit;
+    }
+
+    private static async Task<int> Forecast(Db db, Args a, string? sub)
+    {
+        var key = a.Opt("location") ?? "KNYC";
+        if (!KalshiBot.Core.Evidence.ForecastLocation.Known.TryGetValue(key, out var location))
+            throw new UsageException($"Unknown location '{key}'. Known: {string.Join(", ", KalshiBot.Core.Evidence.ForecastLocation.Known.Keys)}");
+        switch (sub)
+        {
+            case "collect":
+            {
+                var fixtures = a.Opt("fixtures");
+                var minInterval = a.Opt("min-interval") is { } m ? TimeSpan.FromMinutes(int.Parse(m, CultureInfo.InvariantCulture)) : TimeSpan.Zero;
+                a.EnsureAllUsed();
+                var last = db.Scalar<string>("SELECT MAX(finished_at) FROM forecast_runs WHERE location = $l AND status = 'completed'", ("$l", location.Key));
+                if (last is not null && Clock.GetUtcNow() - Ts.Parse(last) < minInterval)
+                {
+                    Console.WriteLine($"forecast for {location.Key} collected at {last}; skipping (min interval {minInterval.TotalMinutes} min)");
+                    return 0;
+                }
+                using var http = fixtures is null
+                    ? new HttpClient { Timeout = TimeSpan.FromSeconds(20) }
+                    : new HttpClient(new KalshiBot.Core.Evidence.NwsFixtureHandler(fixtures));
+                var collector = new KalshiBot.Core.Evidence.NwsForecastCollector(db, http, Clock,
+                    fixtures is null ? "live:nws" : DataOrigin.Synthetic, fixtures is null ? "https://api.weather.gov" : "https://fixture.invalid");
+                var r = await collector.CollectAsync(location);
+                Console.WriteLine($"forecast run #{r.RunId} {location.Key}: {r.Status} [{(fixtures is null ? "live:nws" : "SYNTHETIC")}] " +
+                                  $"{r.Periods} period(s), NWS update time {(r.UpdateTime is { } u ? Ts.ToText(u) : "-")}");
+                foreach (var e in r.Errors) Console.WriteLine($"  ! {e}");
+                return r.Status == "completed" ? 0 : 1;
+            }
+            case "list":
+            {
+                a.EnsureAllUsed();
+                foreach (var v in KalshiBot.Core.Evidence.NwsForecastCollector.DailyHighs(db, location.Key))
+                    Console.WriteLine($"{v.LocalDate} high {v.Temperature}{v.Unit}  NWS updated {(v.UpdateTime is { } u ? Ts.ToText(u) : "-")}  retrieved {Ts.ToText(v.ReceivedAt)}" +
+                                      (DataOrigin.IsSynthetic(v.DataOrigin) ? " [SYNTHETIC]" : ""));
+                return 0;
+            }
+            default: throw new UsageException($"Unknown forecast subcommand '{sub}'.");
+        }
     }
 
     private static int Markets(Db db)

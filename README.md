@@ -36,6 +36,7 @@ Fees also stay "unknown" until Kalshi's schedule is verified.
 ./kb watch add-series KXHIGHNY                   # every open market in a series (daily markets roll over)
 ./kb record                                      # one capture; --repeat N --interval 60 for more
 ./kb markets && ./kb rules <TICKER>
+./kb forecast collect && ./kb forecast list      # NWS Central Park forecast vintages (evidence for KXHIGHNY)
 ./kb research attest-billing --usage-credits-disabled   # after YOU confirm usage credits are off in claude.ai
 ./kb research export <TICKER>                    # packet + paste-ready prompt in data/research/
 ./kb research run <PACKET_ID>                    # guarded subscription round trip; or: kb research import FILE
