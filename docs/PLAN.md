@@ -99,3 +99,9 @@ scoped to this repository. No third-party code was copied, so the §10 per-copy 
   authoritative; the NWS high is a proxy only before Kalshi's first day (2021-08-06). Days Kalshi never stated, or that
   are flagged (conflict or inconsistent), are excluded, not filled. Real run: 1,863 days, 0 flagged, 1,860 of 1,861
   agree with the NWS high. A parser bug (padded values like " 88") first showed as 3 false conflicts; fixed with a test.
+- **2026-11-23 W3: archive inputs.** Migration 8 and `kb archive` keep IEM GFS MOS runs and Kalshi hourly candles in
+  `data/archive.db` (origin `archive:history`, append-only, refuses truth and recording writes). The decision inputs for a
+  climate date are fixed in `DecisionClock`: 15:00 Eastern the day before, the 12Z run, the 00Z forecast time after the day
+  (checked: MAE 2.65 F over 5,429 days). MOS publication time could not be verified, so a 6 h availability lag is assumed and
+  must be measured by the live collector. GFS MOS is fully collected; the candle download is partial (stopped for low
+  memory, resumable). Quotes are sparse in thin tail buckets: only 9 of 34 sampled days had every market two-sided.

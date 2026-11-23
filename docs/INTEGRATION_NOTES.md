@@ -130,6 +130,27 @@ spec's S7–S9 and S16 pages could not be re-read here.
 - **IEM NWS climate reports (verified 2026-11-23):** `GET https://mesonet.agron.iastate.edu/json/cli.py?station=KNYC&year=Y`
   returns one row per climate date (`valid`, `high`, `product`, ...); about 366 rows a year, from at least 2010.
   IEM GFS MOS: `/api/1/mos.json?station=KNYC&model=GFS&runtime=...` (2010 to now). NBS/NBE stopped on 2026-05-04.
+- **IEM bulk GFS MOS (verified 2026-11-23):** `GET /cgi-bin/request/mos.py?station=KNYC&model=GFS&sts=2024-01-01T00:00Z&ets=2025-01-01T00:00Z&format=csv`
+  returns every run (00/06/12/18Z) in the range, about 31,000 rows and 3 MB a year. The CSV has 23 columns including
+  `runtime`, `ftime` (both UTC), `n_x`, `tmp`. `format=json` and rapid repeat requests drew HTTP 429, so `kb archive
+  collect-mos` waits 5 s between requests and retries with back-off. A year's request also returns the next year's
+  00Z Jan 1 run, so adjacent years overlap by one run (de-duplicated).
+- **GFS MOS timing (verified against 5,429 settled highs, 2012-2026):** the max temperature for local day D is `n_x` at
+  forecast time **00Z on D+1** of the 12Z run on D-1: MAE 2.65 F, bias -0.45 F, SD 3.59 F. The 12Z and 12Z-next-day
+  columns carry the overnight min (about 13 F off), and 00Z on D+2 is the following day's max (MAE 5.75). 12Z runs are
+  stored for about 365 days a year; 9 settled days have no 12Z run.
+- **GFS MOS publication time: NOT verified.** The archive holds the cycle time only. IEM's AFOS archive has no MAV products,
+  `nomads.ncep.noaa.gov` returned 403 to this client, and the NWS pages read gave no figure. `DecisionClock.AssumedMosLag`
+  is 6 h (generous; the product is normally out in about 4), which keeps the 12Z run available an hour before the earliest
+  decision time (19:00Z in summer). The live collector must record when each run is first seen so this can be measured.
+- **Kalshi candlesticks (verified 2026-11-23):** per market, `start_ts`, `end_ts` (Unix seconds), `period_interval=60`.
+  `/series/{series}/markets/{ticker}/candlesticks` uses field names `close_dollars` / `volume_fp` / `open_interest_fp`;
+  `/historical/markets/{ticker}/candlesticks` uses `close` / `volume` / `open_interest`. For markets before
+  `GET /historical/cutoff` (`market_settled_ts`, 2026-09-24) use the historical path; the series path also answered for
+  Sep 2026 markets, and a 404 on one path is worth one try on the other. The event-level
+  `/series/{series}/events/{event}/candlesticks` exists only for recent events and returns an array of arrays; the
+  `/historical/events/...` variant 404s, so this project fetches per market. Candles are quote closes: a market with no
+  quote shows bid 0.00 and ask 1.00.
 - **Tick size:** `price_ranges[{start,end,step}]` per market. The risk engine checks limits against it.
 - **Fees (verified 2026-11-23):** source is the Kalshi Fee Schedule PDF, "Last updated and effective: July 7, 2026"
   (sha256 `c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601`), a copy provided by the operator.

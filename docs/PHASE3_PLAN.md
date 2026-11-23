@@ -62,8 +62,9 @@ from 2026-08-14 on. The 99.9% agreement above therefore mostly measures NWS-vs-N
 Weather Company regime, and they agree with the NWS high too. W2 must store the regime per day, and Stage A must report
 results for the Weather Company period separately. Stage B (prospective) runs entirely under the Weather Company rule.
 
-**Not yet verified:** the publication lag of each GFS MOS cycle (the plan assumes the 12Z product is out before
-19:00Z on D-1, 3+ hours before the decision time); whether the `HIGHNY-` and `KXHIGHNY-` series are the same contract
+**Not yet verified:** the publication lag of each GFS MOS cycle (still unmeasurable from here after W3: IEM's archive
+has no publication times and NOMADS refused the request; the code assumes 6 h, `DecisionClock.AssumedMosLag`, and the live
+collector must record first-seen times to replace it); whether the `HIGHNY-` and `KXHIGHNY-` series are the same contract
 economically (same station and source); and bid/ask depth on the thin tail buckets.
 
 ## 3. Data
@@ -176,7 +177,7 @@ models, and a test that fails without the change.
 |---|---|---|
 | W1 | **Done 2026-11-23.** Parse `strike_type` / `floor_strike` / `cap_strike` into the market store (migration 6, backfilled from stored raw bodies), with `OutcomeBucket` (`FromStrikes`, `FromRules`, `Resolve`) and `MarketSnapshot.Bucket` | V3. 34 tests, five mutations caught. Edge semantics and rules-text fallback checked against 8,606 real markets (INTEGRATION_NOTES). |
 | W2 | **Done 2026-11-23.** `kb truth collect-kalshi`, `collect-cli`, `report` into its own `data/truth.db` (origin `archive:truth`, migration 7, append-only). Kalshi `expiration_value` per settled event (live and `/historical`), the IEM NWS climate-report high beside it as a cross-check, and the settlement regime per day. A differing day is flagged and reported, never patched. `TruthStore.Resolve` gives the scoring series. | V1/V2 (2a). 25 tests, 11 mutations caught. Real run below. |
-| W3 | Archive importers for IEM **GFS MOS** (KNYC, 12Z cycle, 2010+) and Kalshi hourly candlesticks, into archive databases separate from `truth.db` | V5/V7. Raw bodies plus hashes, like the recorder. NBM is not imported (stale on IEM). IEM climate-report history is already collected by W2. |
+| W3 | **Code done 2026-11-23; data partly collected.** `kb archive collect-mos`, `collect-candles`, `report` into `data/archive.db` (origin `archive:history`, migration 8, append-only), plus `DecisionClock` (15:00 ET decision, 12Z run, 00Z-after forecast time, 6 h availability assumption). | 21 tests, 23 mutations caught. **GFS MOS: complete** (520,086 rows, 2010 to 2026-11-23, no conflicts). **Candles: partial**: 2,222 of about 11,000 market windows stored when the run was stopped for low memory; resume with `kb archive collect-candles`. Forecast-time mapping verified: MAE 2.65 F over 5,429 days. |
 | W4 | Evidence-aware forecast interface: change `IForecastModel.Forecast(MarketSnapshot)` to also take a point-in-time evidence view (forecast vintages as of decision time) | Test: a vintage received after the decision time must not change the forecast. |
 | W5 | `kb model fit nyc-high-residual` writes the frozen parameter JSON and prints its hash; `ResidualForecastModel` loads it | Deterministic: the same archive gives byte-identical parameters. |
 | W6 | `kb eval retro` runs Stage A: walk-forward, baselines, bootstrap, kill gate A verdict | Seed and inputs recorded, so the report reproduces. |
