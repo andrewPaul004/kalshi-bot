@@ -43,7 +43,7 @@ public class RecorderTests
         // Event and series metadata captured once per run.
         Assert.Equal(1, t.Db.Scalar<long>("SELECT COUNT(*) FROM event_snapshots"));
         Assert.Equal(1, t.Db.Scalar<long>("SELECT COUNT(*) FROM series_snapshots"));
-        Assert.Equal("KXSYNTHWX", new MarketStore(t.Db).LatestEvent(s.EventTicker, clock.Now)!.SeriesTicker);
+        Assert.Equal("KXSYNTHWX", new MarketStore(t.Db).EventFor(s)!.SeriesTicker);
     }
 
     [Fact]
@@ -153,6 +153,40 @@ public class RecorderTests
     }
 
     [Fact]
+    public async Task A_database_holds_one_data_origin()
+    {
+        // Spec 8.1: fixture, demo, and production data never share a database.
+        using var t = new TempDb();
+        var clock = FixedClock.Default();
+        Fx.Record(t.Db, clock, Fx.Open, Fx.T50);
+        Assert.Equal(DataOrigin.Synthetic, DatabaseOrigin.Get(t.Db));
+        var live = new KalshiPublicClient(new HttpClient(new FixtureHandler(Fx.Open)), KalshiEndpoint.Production, clock,
+            new KalshiClientOptions { MinInterval = TimeSpan.Zero });
+        var e = await Assert.ThrowsAsync<KalshiBotException>(() => new Recorder(t.Db, live, clock).CaptureAsync([Fx.T50]));
+        Assert.Contains("would blend datasets", e.Message);
+        Assert.Equal(1, t.Db.Scalar<long>("SELECT COUNT(*) FROM capture_runs"));
+    }
+
+    [Fact]
+    public void Event_and_series_metadata_from_the_same_run_apply_even_though_fetched_after_the_market()
+    {
+        // Regression: with a real clock the event/series responses arrive milliseconds after the market response.
+        using var t = new TempDb();
+        var clock = new TickingClock(FixedClock.Default().Now);
+        Fx.Record(t.Db, clock, Fx.Open);
+        var store = new MarketStore(t.Db);
+        var s = store.Latest(Fx.T60)!;
+        var ev = store.EventFor(s)!;
+        Assert.True(ev.ObservedAt > store.Latest(Fx.T50)!.ObservedAt); // fetched after the first market
+        Assert.Equal("quadratic", store.SeriesFor(ev.SeriesTicker, s)!.FeeType);
+
+        new KalshiBot.Core.Trading.PaperLedger(t.Db, clock).EnsureAccount("paper", 500m, DataOrigin.Synthetic);
+        var r = Fx.Engine(t.Db, clock).Run("paper", Fx.T50, Fx.Strategy(), Fx.Model());
+        Assert.Equal("synthetic-fixture-quadratic-0.07", r.FeeScheduleId);
+        Assert.Single(r.Orders);
+    }
+
+    [Fact]
     public void Watchlist_rejects_malformed_tickers()
     {
         using var t = new TempDb();
@@ -166,11 +200,4 @@ public class RecorderTests
     private static KalshiPublicClient Client(HttpMessageHandler h, TimeProvider clock) =>
         new(new HttpClient(h), KalshiEndpoint.Fixture, clock,
             new KalshiClientOptions { MinInterval = TimeSpan.Zero, MaxBackoff = TimeSpan.FromMilliseconds(10) });
-}
-
-/// <summary>Synchronous access to fixture responses for composing scripted handlers.</summary>
-internal sealed class FixtureHandlerProxy(string dir)
-{
-    public HttpResponseMessage Get(HttpRequestMessage req) =>
-        new HttpMessageInvoker(new FixtureHandler(dir)).SendAsync(req, CancellationToken.None).GetAwaiter().GetResult();
 }

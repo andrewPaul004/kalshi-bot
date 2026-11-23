@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using KalshiBot.Core.Common;
 using KalshiBot.Core.Research;
@@ -17,40 +18,44 @@ public class ResearchExportTests
         clock.Advance(TimeSpan.FromHours(1));
         var b = new PacketExporter(t.Db, clock).Export(Fx.T50);
 
-        Assert.Equal(a.PacketId, b.PacketId);
         Assert.Equal(a.Json, b.Json);
         Assert.True(b.AlreadyExisted);
+        Assert.Matches("^pkt_[0-9]+_[0-9a-f]{12}$", a.PacketId);
 
         var p = JsonNode.Parse(a.Json)!;
-        Assert.Equal(ResearchContract.PacketSchema, (string)p["schema"]!);
-        Assert.Equal(a.PacketId, (string)p["packet_id"]!);
-        Assert.Equal(DataOrigin.Synthetic, (string)p["data_origin"]!);
-        Assert.Contains("SYNTHETIC", (string)p["synthetic_warning"]!);
-        Assert.StartsWith("SYNTHETIC FIXTURE", (string)p["rules"]!["rules_primary"]!);
-        Assert.Equal(4, p["sources"]!.AsArray().Count); // market, orderbook, event, series
-        Assert.All(p["sources"]!.AsArray(), s => Assert.Matches("^[0-9a-f]{64}$", (string)s!["body_sha256"]!));
+        Assert.Equal(ResearchContract.PacketSchema, (string)p["schemaVersion"]!);
+        Assert.Equal(ResearchContract.PromptVersion, (string)p["promptVersion"]!);
+        Assert.Equal(a.PacketId, (string)p["packetId"]!);
+        Assert.Equal(DataOrigin.Synthetic, (string)p["dataOrigin"]!);
+        Assert.Contains("SYNTHETIC", (string)p["syntheticWarning"]!);
+        Assert.Equal("KXSYNTHWX", (string)p["market"]!["seriesTicker"]!);
+        Assert.Equal(4, p["sources"]!.AsArray().Count);
+        Assert.All(p["sources"]!.AsArray(), s => Assert.Matches("^[0-9a-f]{64}$", (string)s!["bodySha256"]!));
+        Assert.Equal(ResearchContract.RecordSchema, (string)p["resultContract"]!["schemaVersion"]!);
 
-        // Prices are left out so a research estimate cannot anchor on them.
+        // Prices are left out so research cannot anchor on them.
         Assert.DoesNotContain("yes_bid", a.Json);
         Assert.DoesNotContain("0.4500", a.Json);
 
-        // The id is the hash of the body without packet_id.
+        // packetHash is the hash of the body without packetId/packetHash.
         var body = p.DeepClone().AsObject();
-        body.Remove("packet_id");
-        Assert.Equal(a.PacketId, CanonicalJson.HashOf(body));
+        body.Remove("packetId");
+        body.Remove("packetHash");
+        Assert.Equal(a.PacketHash, CanonicalJson.HashOf(body));
     }
 
     [Fact]
-    public void New_snapshot_gives_a_new_packet()
+    public void Schema_file_uses_only_the_validated_subset_and_matches_the_contract_version()
     {
-        using var t = new TempDb();
-        var clock = FixedClock.Default();
-        Fx.Record(t.Db, clock, Fx.Open, Fx.T50);
-        var a = new PacketExporter(t.Db, clock).Export(Fx.T50);
-        clock.Advance(TimeSpan.FromMinutes(1));
-        Fx.Record(t.Db, clock, Fx.Open, Fx.T50);
-        var b = new PacketExporter(t.Db, clock).Export(Fx.T50);
-        Assert.NotEqual(a.PacketId, b.PacketId);
+        // Loading succeeds only if every keyword is supported (fail closed on drift).
+        Assert.Equal(JsonValueKind.Object, ResearchContract.Schema.ValueKind);
+        var portable = JsonNode.Parse(ResearchContract.PortableSchemaJson)!.ToJsonString();
+        foreach (var limit in new[] { "maxLength", "maxItems", "pattern", "minimum", "maximum" })
+            Assert.DoesNotContain($"\"{limit}\"", portable);
+        Assert.Contains("\"additionalProperties\":false", portable);
+
+        using var bad = JsonDocument.Parse("""{"type":"object","properties":{"x":{"type":"string","format":"email"}}}""");
+        Assert.Throws<InvalidOperationException>(() => JsonSchemaSubset.EnsureSupported(bad.RootElement));
     }
 }
 
@@ -65,56 +70,60 @@ public class ResearchImportTests
     }
 
     private static List<string> Reject(TempDb t, FixedClock clock, string json, string source = "manual") =>
-        Assert.Throws<ResultRejectedException>(() => new ResultImporter(t.Db, clock).Import(json, source)).Errors.ToList();
+        Assert.Throws<ResearchRejectedException>(() => new ResearchImporter(t.Db, clock).Import(json, source)).Errors.ToList();
 
     [Fact]
-    public void Valid_result_is_stored_as_unvalidated_and_reimport_is_idempotent()
+    public void Valid_record_is_stored_with_its_probability_in_a_separate_unvalidated_table()
     {
         var (t, clock, p) = Setup();
         using var _ = t;
-        var json = Fx.ValidResult(p, clock).ToJsonString();
-        var first = new ResultImporter(t.Db, clock).Import(json, "manual");
-        var again = new ResultImporter(t.Db, clock).Import(json, "manual");
+        var json = Fx.ValidRecord(p, clock).ToJsonString();
+        var first = new ResearchImporter(t.Db, clock).Import(json, "manual");
+        var again = new ResearchImporter(t.Db, clock).Import(json, "manual");
         Assert.False(first.AlreadyImported);
         Assert.True(again.AlreadyImported);
-        Assert.Equal(first.ResultId, again.ResultId);
-        Assert.Equal(0.6m, first.ProbabilityYes);
-        Assert.Equal("unvalidated", t.Db.Scalar<string>("SELECT validation_status FROM research_results"));
-        Assert.Equal(1, t.Db.Scalar<long>("SELECT COUNT(*) FROM research_results"));
+        Assert.Equal(0.6m, first.ExperimentalProbability);
+        Assert.Equal("0.6", t.Db.Scalar<string>("SELECT probability_yes FROM experimental_probabilities"));
+        Assert.Equal("unvalidated", t.Db.Scalar<string>("SELECT validation_status FROM experimental_probabilities"));
+        Assert.Throws<Microsoft.Data.Sqlite.SqliteException>(() => t.Db.Exec("UPDATE experimental_probabilities SET validation_status = 'validated'"));
     }
 
     [Fact]
-    public void Schema_forbids_marking_a_result_validated()
+    public void Reusing_a_research_id_for_different_content_is_rejected()
     {
         var (t, clock, p) = Setup();
         using var _ = t;
-        new ResultImporter(t.Db, clock).Import(Fx.ValidResult(p, clock).ToJsonString(), "manual");
-        Assert.Throws<Microsoft.Data.Sqlite.SqliteException>(() =>
-            t.Db.Exec("UPDATE research_results SET validation_status = 'validated'"));
+        new ResearchImporter(t.Db, clock).Import(Fx.ValidRecord(p, clock).ToJsonString(), "manual");
+        var changed = Fx.ValidRecord(p, clock, 0.4m);
+        Assert.Contains("researchId 'r-1' already exists with different content", Reject(t, clock, changed.ToJsonString()));
     }
 
-    [Theory]
-    [InlineData("extra", "unknown key 'extra'")]
-    public void Unknown_keys_are_rejected(string key, string expected)
+    [Theory] // AC-04: action commands, live flags, order sizes, risk overrides cannot exist as fields.
+    [InlineData("orderSize")]
+    [InlineData("action")]
+    [InlineData("live")]
+    [InlineData("riskLimitOverride")]
+    [InlineData("command")]
+    public void Unknown_fields_are_rejected(string key)
     {
         var (t, clock, p) = Setup();
         using var _ = t;
-        var r = Fx.ValidResult(p, clock);
+        var r = Fx.ValidRecord(p, clock);
         r[key] = "x";
-        Assert.Contains(expected, Reject(t, clock, r.ToJsonString()));
+        Assert.Contains($"unknown key '$.{key}'", Reject(t, clock, r.ToJsonString()));
     }
 
     [Fact]
-    public void Each_missing_key_is_reported()
+    public void Nested_unknown_fields_and_missing_keys_are_rejected()
     {
         var (t, clock, p) = Setup();
         using var _ = t;
-        var r = Fx.ValidResult(p, clock);
-        r.Remove("confidence");
-        r.Remove("sources");
+        var r = Fx.ValidRecord(p, clock);
+        r["experimentalProbabilityYes"]!["size"] = 5;
+        r.Remove("disposition");
         var errors = Reject(t, clock, r.ToJsonString());
-        Assert.Contains("missing key 'confidence'", errors);
-        Assert.Contains("missing key 'sources'", errors);
+        Assert.Contains(errors, e => e.Contains("size"));
+        Assert.Contains("missing key '$.disposition'", errors);
     }
 
     [Fact]
@@ -122,104 +131,118 @@ public class ResearchImportTests
     {
         var (t, clock, p) = Setup();
         using var _ = t;
-        var json = Fx.ValidResult(p, clock).ToJsonString();
-        Assert.Contains("duplicate key 'confidence'", Reject(t, clock, json.Replace("\"confidence\":\"low\"", "\"confidence\":\"low\",\"confidence\":\"high\"")));
+        var json = Fx.ValidRecord(p, clock).ToJsonString();
+        Assert.Contains("duplicate key '$.disposition'", Reject(t, clock, json.Replace("\"disposition\":\"no_issue_found\"", "\"disposition\":\"no_issue_found\",\"disposition\":\"needs_review\"")));
         Assert.Contains(Reject(t, clock, "/* c */" + json), e => e.StartsWith("not valid JSON"));
         Assert.Contains(Reject(t, clock, json[..^1] + ",}"), e => e.StartsWith("not valid JSON"));
+        Assert.Contains(Reject(t, clock, new string(' ', ResearchContract.MaxRecordBytes + 1)), e => e.Contains("exceeds"));
     }
 
-    [Theory]
-    [InlineData("\"0.6\"", "probability_yes must be a number or null")]
-    [InlineData("1.5", "probability_yes must be within [0, 1]")]
-    [InlineData("-0.1", "probability_yes must be within [0, 1]")]
-    [InlineData("0.123456", "probability_yes may have at most 4 decimal places")]
-    [InlineData("true", "probability_yes must be a number or null")]
-    public void Probability_must_be_a_bounded_number(string raw, string expected)
+    [Theory] // malformed numbers
+    [InlineData("\"0.6\"")]
+    [InlineData("1.5")]
+    [InlineData("-0.1")]
+    [InlineData("0.123456")]
+    [InlineData("true")]
+    public void Experimental_probability_must_be_a_bounded_plain_number(string raw)
     {
         var (t, clock, p) = Setup();
         using var _ = t;
-        var json = Fx.ValidResult(p, clock).ToJsonString().Replace("\"probability_yes\":0.6", "\"probability_yes\":" + raw);
-        Assert.Contains(expected, Reject(t, clock, json));
-    }
-
-    [Fact]
-    public void Abstention_requires_a_reason_and_yields_no_estimate()
-    {
-        var (t, clock, p) = Setup();
-        using var _ = t;
-        var noReason = Fx.ValidResult(p, clock, prob: null);
-        noReason["abstain_reason"] = null;
-        Assert.Contains("abstain_reason is required when probability_yes is null", Reject(t, clock, noReason.ToJsonString()));
-
-        var both = Fx.ValidResult(p, clock);
-        both["abstain_reason"] = "but also a number";
-        Assert.Contains("abstain_reason must be null when probability_yes is given", Reject(t, clock, both.ToJsonString()));
-
-        // A valid estimate followed by an abstention: the older estimate must not be used.
-        new ResultImporter(t.Db, clock).Import(Fx.ValidResult(p, clock).ToJsonString(), "manual");
-        Assert.NotNull(new ResearchStore(t.Db).LatestEstimate(Fx.T50));
-        clock.Advance(TimeSpan.FromMinutes(1));
-        new ResultImporter(t.Db, clock).Import(Fx.ValidResult(p, clock, prob: null).ToJsonString(), "manual");
-        Assert.Null(new ResearchStore(t.Db).LatestEstimate(Fx.T50));
+        var json = Fx.ValidRecord(p, clock).ToJsonString().Replace("\"value\":0.6", "\"value\":" + raw);
+        Assert.NotEmpty(Reject(t, clock, json));
     }
 
     [Fact]
-    public void Result_must_match_its_packet_ticker_and_rules()
+    public void Linkage_to_the_exported_packet_is_exact()
     {
         var (t, clock, p) = Setup();
         using var _ = t;
-        var wrongTicker = Fx.ValidResult(p, clock);
-        wrongTicker["ticker"] = Fx.T60;
-        Assert.Contains(Reject(t, clock, wrongTicker.ToJsonString()), e => e.Contains("does not match packet ticker"));
-
-        var wrongRules = Fx.ValidResult(p, clock);
-        wrongRules["rules_sha256"] = new string('a', 64);
-        Assert.Contains("rules_sha256 does not match the packet's rules version", Reject(t, clock, wrongRules.ToJsonString()));
-
-        var unknownPacket = Fx.ValidResult(p, clock);
-        unknownPacket["packet_id"] = new string('b', 64);
-        Assert.Contains(Reject(t, clock, unknownPacket.ToJsonString()), e => e.Contains("is unknown"));
-    }
-
-    [Fact]
-    public void Field_level_validation_covers_urls_timestamps_and_enums()
-    {
-        var (t, clock, p) = Setup();
-        using var _ = t;
-        var r = Fx.ValidResult(p, clock);
-        r["confidence"] = "certain";
-        r["as_of"] = "yesterday";
-        r["sources"]![0]!["url"] = "javascript:alert(1)";
-        r["sources"]![0]!["retrieved_at"] = "2026-11-23";
-        r["key_factors"] = new JsonArray(42);
+        var r = Fx.ValidRecord(p, clock);
+        r["marketTicker"] = "KXFAKE-26JAN01";
+        r["eventTicker"] = "KXFAKE";
+        r["seriesTicker"] = null;
+        r["marketRulesHash"] = new string('a', 64);
+        r["packetHash"] = new string('b', 64);
+        r["researcherVersion"]!["promptVersion"] = "other";
         var errors = Reject(t, clock, r.ToJsonString());
-        Assert.Contains("confidence must be low, medium or high", errors);
-        Assert.Contains("as_of must be an ISO 8601 timestamp with offset", errors);
-        Assert.Contains("sources[0].url must be an absolute http(s) URL", errors);
-        Assert.Contains("sources[0].retrieved_at must be an ISO 8601 timestamp with offset", errors);
-        Assert.Contains(errors, e => e.StartsWith("key_factors[0]"));
+        Assert.Contains(errors, e => e.StartsWith("marketTicker does not match"));
+        Assert.Contains(errors, e => e.StartsWith("eventTicker does not match"));
+        Assert.Contains(errors, e => e.StartsWith("seriesTicker does not match"));
+        Assert.Contains("marketRulesHash does not match the packet's rules version", errors);
+        Assert.Contains("packetHash does not match the exported packet", errors);
+        Assert.Contains(errors, e => e.StartsWith("researcherVersion.promptVersion must be"));
+
+        var unknown = Fx.ValidRecord(p, clock);
+        unknown["packetId"] = "pkt_999_000000000000";
+        Assert.Contains(Reject(t, clock, unknown.ToJsonString()), e => e.Contains("is unknown"));
     }
 
     [Fact]
-    public void Oversized_and_non_object_inputs_are_rejected()
+    public void Impossible_and_expired_dates_are_rejected()
     {
-        var (t, clock, _) = Setup();
-        using var __ = t;
-        Assert.Contains(Reject(t, clock, new string(' ', ResearchContract.MaxResultBytes + 1)), e => e.Contains("exceeds"));
-        Assert.Contains("root must be a JSON object", Reject(t, clock, "[1,2]"));
+        var (t, clock, p) = Setup();
+        using var _ = t;
+        var future = Fx.ValidRecord(p, clock);
+        future["createdAtUtc"] = Ts.ToText(clock.Now.AddHours(1));
+        Assert.Contains("createdAtUtc is in the future", Reject(t, clock, future.ToJsonString()));
+
+        var tooLong = Fx.ValidRecord(p, clock);
+        tooLong["validUntilUtc"] = Ts.ToText(clock.Now.AddDays(30));
+        Assert.Contains(Reject(t, clock, tooLong.ToJsonString()), e => e.StartsWith("validUntilUtc may be at most"));
+
+        var beforePacket = Fx.ValidRecord(p, clock);
+        beforePacket["createdAtUtc"] = Ts.ToText(clock.Now.AddDays(-1));
+        Assert.Contains("createdAtUtc is before the packet existed", Reject(t, clock, beforePacket.ToJsonString()));
+
+        var r = Fx.ValidRecord(p, clock);
+        clock.Advance(TimeSpan.FromDays(3)); // validUntil was +2 days
+        Assert.Contains("record has expired (validUntilUtc is not in the future)", Reject(t, clock, r.ToJsonString()));
+
+        var offset = Fx.ValidRecord(p, clock).ToJsonString().Replace("Z\",\"validUntilUtc", "+00:00\",\"validUntilUtc");
+        Assert.Contains(Reject(t, clock, offset), e => e.Contains("createdAtUtc"));
     }
 
     [Fact]
-    public void Synthetic_fixture_results_cannot_attach_to_live_packets()
+    public void Evidence_is_required_and_checked_unless_insufficient()
+    {
+        var (t, clock, p) = Setup();
+        using var _ = t;
+        var none = Fx.ValidRecord(p, clock);
+        none["evidence"] = new JsonArray();
+        Assert.Contains("evidence is required unless disposition is insufficient_evidence", Reject(t, clock, none.ToJsonString()));
+        none["disposition"] = "insufficient_evidence";
+        Assert.False(new ResearchImporter(t.Db, clock).Import(none.ToJsonString(), "manual").AlreadyImported);
+
+        var bad = Fx.ValidRecord(p, clock, researchId: "r-2");
+        bad["evidence"]![0]!["url"] = "javascript:alert(1)";
+        bad["evidence"]![0]!["retrievedAtUtc"] = Ts.ToText(clock.Now.AddHours(1));
+        bad["evidence"]![0]!["dataHash"] = "not-a-hash";
+        var errors = Reject(t, clock, bad.ToJsonString());
+        Assert.Contains(errors, e => e.Contains("dataHash"));
+    }
+
+    [Fact]
+    public void Evidence_semantics_are_checked_after_structure()
+    {
+        var (t, clock, p) = Setup();
+        using var _ = t;
+        var bad = Fx.ValidRecord(p, clock);
+        bad["evidence"]![0]!["url"] = "javascript:alert(1)";
+        bad["evidence"]![0]!["retrievedAtUtc"] = Ts.ToText(clock.Now.AddHours(1));
+        var errors = Reject(t, clock, bad.ToJsonString());
+        Assert.Contains("evidence[0].url must be an absolute http(s) URL", errors);
+        Assert.Contains("evidence[0].retrievedAtUtc is after the record was created", errors);
+    }
+
+    [Fact]
+    public void Synthetic_fixture_records_cannot_attach_to_live_packets()
     {
         using var t = new TempDb();
         var clock = FixedClock.Default();
         Fx.Record(t.Db, clock, Fx.Open, Fx.T50);
-        // Relabel the recorded data as live to simulate a live packet.
         t.Db.Exec("UPDATE market_snapshots SET data_origin = 'live:production'");
         var live = new PacketExporter(t.Db, clock).Export(Fx.T50);
-        Assert.Equal(DataOrigin.LiveProduction, live.DataOrigin);
-        var errors = Reject(t, clock, Fx.ValidResult(live, clock).ToJsonString(), "synthetic-fixture");
-        Assert.Contains("synthetic-fixture results may only answer packets built from synthetic data", errors);
+        Assert.Contains("synthetic-fixture records may only answer packets built from synthetic data",
+            Reject(t, clock, Fx.ValidRecord(live, clock).ToJsonString(), "synthetic-fixture"));
     }
 }

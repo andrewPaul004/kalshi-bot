@@ -6,6 +6,26 @@ using KalshiBot.Core.Storage;
 
 namespace KalshiBot.Core.Recording;
 
+/// <summary>
+/// Each database holds one data origin (fixture, demo, or production) so datasets and P&amp;L never blend (spec 8.1).
+/// The first capture binds it; later captures of another origin are refused.
+/// </summary>
+public static class DatabaseOrigin
+{
+    public static string? Get(Db db) => db.Scalar<string>("SELECT value FROM controls WHERE key = 'db_data_origin'");
+
+    public static void BindOrThrow(Db db, string origin, TimeProvider time)
+    {
+        var bound = Get(db);
+        if (bound is null)
+            db.Exec("INSERT INTO controls (key, value, updated_at) VALUES ('db_data_origin', $o, $t)",
+                ("$o", origin), ("$t", Ts.ToText(time.GetUtcNow())));
+        else if (bound != origin)
+            throw new KalshiBotException(
+                $"{db.Path} holds {bound} data; recording {origin} data into it would blend datasets. Use a separate --db.");
+    }
+}
+
 public sealed record CaptureSummary(long RunId, string Status, string DataOrigin, int Snapshots, int RulesChanges, IReadOnlyList<string> Errors);
 
 /// <summary>
@@ -27,6 +47,7 @@ public sealed class Recorder(Db db, KalshiPublicClient client, TimeProvider time
     {
         RecoverAbandonedRuns();
         var origin = client.Endpoint.DataOrigin;
+        DatabaseOrigin.BindOrThrow(db, origin, time);
         var runId = db.Insert(
             "INSERT INTO capture_runs (started_at, status, data_origin, base_url, app_version) VALUES ($s, 'running', $o, $b, $v)",
             ("$s", Ts.ToText(time.GetUtcNow())), ("$o", origin), ("$b", client.Endpoint.BaseUrl), ("$v", AppVersion));

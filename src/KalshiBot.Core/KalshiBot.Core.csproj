@@ -5,4 +5,8 @@
   <ItemGroup>
     <InternalsVisibleTo Include="KalshiBot.Tests" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The research contract (spec 4.5) ships inside the assembly so the importer validates against the exact file. -->
+    <EmbeddedResource Include="..\..\schemas\research-record.schema.json" LogicalName="research-record.schema.json" />
+  </ItemGroup>
 </Project>

@@ -20,48 +20,73 @@ public static class OrderAction
 }
 
 /// <summary>
-/// A probability from the research pipeline. ValidationStatus is always "unvalidated" in this phase
-/// (enforced by a schema CHECK); the type keeps the field so the boundary is explicit at every use.
+/// A probability from a deterministic, versioned forecast model (spec 3.1 "Strategy evaluator"). Never from research:
+/// Claude's experimental probabilities live in the research tables and have no path into this type (AC-05).
 /// </summary>
-public sealed record ProbabilityEstimate(
-    long ResearchResultId, string PacketId, long PacketSnapshotId, string PacketRulesSha256, string PacketDataOrigin,
-    decimal ProbabilityYes, string Confidence, string SourceKind, string ValidationStatus, DateTimeOffset ImportedAt,
-    DateTimeOffset AsOf)
+/// <param name="Uncertainty">Policy buffer subtracted from the probability before computing edge (spec 5.3/5.4).</param>
+/// <param name="EvidenceRevision">Stable identity of the model inputs; part of the signal key so a new scan of the
+/// same evidence cannot authorize another entry (spec 7.2, AC-20).</param>
+public sealed record Forecast(string ModelId, decimal ProbabilityYes, decimal Uncertainty, string Method,
+    DateTimeOffset InputsAsOf, string EvidenceRevision, bool Synthetic)
 {
-    public bool IsValidated => ValidationStatus == "validated";
-    public string Label => IsValidated ? "validated" : "EXPERIMENTAL (unvalidated)";
+    public decimal ConservativeFor(string side) =>
+        (side == Side.Yes ? ProbabilityYes : 1m - ProbabilityYes) - Uncertainty;
 }
+
+public interface IForecastModel
+{
+    string Id { get; }
+
+    /// <summary>Deterministic: same snapshot, same forecast. Null means abstain.</summary>
+    Forecast? Forecast(MarketSnapshot snapshot);
+}
+
+/// <summary>A fee schedule that applies to this market at this time. Absent = fees unknown = no new risk (DATA-01).</summary>
+public sealed record FeeContext(string ScheduleId, decimal TakerCoefficient, decimal? Multiplier, string FeeType);
 
 public sealed record PositionView(string Ticker, string Side, long Quantity, decimal CostBasis);
 
-public sealed record StrategyInput(MarketSnapshot Snapshot, string RulesSha256, ProbabilityEstimate? Estimate,
-    IReadOnlyList<PositionView> Positions, decimal? FeeMultiplier = null);
+public sealed record StrategyInput(MarketSnapshot Snapshot, string? SeriesTicker, Forecast? Forecast, FeeContext? Fees,
+    IReadOnlyList<PositionView> Positions);
 
 public sealed record OrderIntent(string Ticker, string Side, string Action, int Quantity, decimal LimitPrice);
 
-public sealed record StrategyDecision(IReadOnlyList<OrderIntent> Orders, string Rationale);
+/// <param name="SignalKey">Stable key over strategy version, market, side and evidence window (spec 7.2).</param>
+public sealed record Candidate(OrderIntent Intent, string SignalKey);
+
+public sealed record StrategyDecision(IReadOnlyList<Candidate> Candidates, string Rationale);
 
 /// <summary>
-/// Deterministic strategy contract: Decide must be a pure function of its input and the strategy's own
-/// parameters. No clock, no I/O, no randomness. The engine hashes (Id, Parameters, input) into a decision id,
-/// which makes reruns idempotent.
+/// Deterministic strategy contract: Decide is a pure function of its input and the strategy's own configuration.
+/// No clock, no I/O, no randomness, no research input.
 /// </summary>
 public interface IStrategy
 {
-    /// <summary>Stable name including version, e.g. "edge-threshold/1". Change the version when logic changes.</summary>
+    /// <summary>Name and version, e.g. "edge-threshold/2". A logic change is a new version.</summary>
     string Id { get; }
 
-    /// <summary>Canonical parameter text included in the decision hash.</summary>
-    string Parameters { get; }
+    /// <summary>Hash of the full configuration (parameters, allowlist). Part of every decision id.</summary>
+    string ConfigHash { get; }
 
     StrategyDecision Decide(StrategyInput input);
 }
 
-public sealed record AccountState(long AccountId, string Name, decimal StartingCash, decimal Cash,
-    IReadOnlyList<PositionView> Positions, decimal TodayPremiumSpent, decimal RealizedPnl, bool Halted)
+/// <summary>Everything the risk engine needs about the account, recomputed from the ledger and reservations.</summary>
+public sealed record AccountState(
+    long AccountId, string Name, string DataOrigin, decimal StartingCash, decimal Cash,
+    IReadOnlyList<PositionView> Positions,
+    decimal HeldReservations,
+    IReadOnlyDictionary<string, decimal> CapitalAtRiskByTicker,
+    IReadOnlyDictionary<string, decimal> CapitalAtRiskByEvent,
+    int EntriesToday, int OpenOrders, decimal RealizedPnl, bool Halted)
 {
     public long Held(string ticker, string side) =>
         Positions.Where(p => p.Ticker == ticker && p.Side == side).Sum(p => p.Quantity);
 
     public decimal OpenCostBasis => Positions.Sum(p => p.CostBasis);
+
+    /// <summary>Unsettled capital at risk: open cost basis plus every held reservation (spec 6.1).</summary>
+    public decimal CapitalAtRisk => OpenCostBasis + HeldReservations;
+
+    public decimal AvailableCash => Cash - HeldReservations;
 }

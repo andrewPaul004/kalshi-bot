@@ -239,6 +239,212 @@ public static class Schema
         ALTER TABLE research_results ADD COLUMN as_of TEXT;
         UPDATE research_results SET as_of = json_extract(result_json, '$.as_of') WHERE as_of IS NULL;
         """),
+        (3, """
+        -- Spec v2.0 alignment. The pre-spec research and paper tables are retired, not deleted: renamed to legacy_*_v1
+        -- (their append-only triggers and foreign keys follow the rename) and no longer read or written.
+        ALTER TABLE research_results  RENAME TO legacy_research_results_v1;
+        ALTER TABLE research_runs     RENAME TO legacy_research_runs_v1;
+        ALTER TABLE research_packets  RENAME TO legacy_research_packets_v1;
+        ALTER TABLE paper_settlements RENAME TO legacy_paper_settlements_v1;
+        ALTER TABLE ledger_entries    RENAME TO legacy_ledger_entries_v1;
+        ALTER TABLE paper_fills       RENAME TO legacy_paper_fills_v1;
+        ALTER TABLE paper_orders      RENAME TO legacy_paper_orders_v1;
+        ALTER TABLE paper_accounts    RENAME TO legacy_paper_accounts_v1;
+
+        -- Research (spec 4.5). Records are evidence and suggestions, never orders.
+        CREATE TABLE research_packets (
+            packet_id      TEXT PRIMARY KEY,
+            packet_hash    TEXT NOT NULL UNIQUE,
+            market_ticker  TEXT NOT NULL,
+            event_ticker   TEXT NOT NULL,
+            series_ticker  TEXT,
+            snapshot_id    INTEGER NOT NULL REFERENCES market_snapshots(id),
+            rules_id       INTEGER NOT NULL REFERENCES market_rules(id),
+            rules_sha256   TEXT NOT NULL,
+            data_origin    TEXT NOT NULL,
+            prompt_version TEXT NOT NULL,
+            created_at     TEXT NOT NULL,
+            packet_json    TEXT NOT NULL
+        );
+
+        CREATE TABLE research_records (
+            id                   INTEGER PRIMARY KEY,
+            research_id          TEXT NOT NULL UNIQUE,
+            packet_id            TEXT NOT NULL REFERENCES research_packets(packet_id),
+            record_sha256        TEXT NOT NULL,
+            market_ticker        TEXT NOT NULL,
+            disposition          TEXT NOT NULL CHECK (disposition IN ('needs_review','insufficient_evidence','no_issue_found')),
+            created_at_utc       TEXT NOT NULL,
+            valid_until_utc      TEXT NOT NULL,
+            source_kind          TEXT NOT NULL CHECK (source_kind IN ('claude-subscription-cli','manual','synthetic-fixture')),
+            prompt_version       TEXT NOT NULL,
+            reported_cli         TEXT,
+            reported_model       TEXT,
+            observed_cli_version TEXT,
+            observed_model       TEXT,
+            imported_at          TEXT NOT NULL,
+            record_json          TEXT NOT NULL
+        );
+
+        -- Separate table on purpose (spec 4.5, AC-05): the strategy evaluator has no code path that reads it.
+        -- 'validated' is unrepresentable until a calibration process exists and a migration relaxes the CHECK.
+        CREATE TABLE experimental_probabilities (
+            research_record_id INTEGER PRIMARY KEY REFERENCES research_records(id),
+            probability_yes    TEXT NOT NULL,
+            method             TEXT NOT NULL,
+            uncertainty        TEXT NOT NULL,
+            validation_status  TEXT NOT NULL CHECK (validation_status = 'unvalidated')
+        );
+
+        -- Audit of every Claude CLI research attempt, including refusals and skips.
+        CREATE TABLE research_runs (
+            id                 INTEGER PRIMARY KEY,
+            packet_id          TEXT NOT NULL REFERENCES research_packets(packet_id),
+            started_at         TEXT NOT NULL,
+            finished_at        TEXT NOT NULL,
+            outcome            TEXT NOT NULL CHECK (outcome IN ('refused','failed','imported','skipped')),
+            auth_method        TEXT,
+            subscription_type  TEXT,
+            cli_version        TEXT,
+            detail             TEXT,
+            stdout_sha256      TEXT,
+            stdout             TEXT,
+            research_record_id INTEGER REFERENCES research_records(id)
+        );
+
+        -- Operator statements the software cannot verify (spec 4.2 step 4), e.g. "usage credits disabled".
+        CREATE TABLE billing_attestations (
+            id          INTEGER PRIMARY KEY,
+            attested_at TEXT NOT NULL,
+            statement   TEXT NOT NULL
+        );
+        CREATE TRIGGER billing_attestations_append_only_u BEFORE UPDATE ON billing_attestations BEGIN SELECT RAISE(ABORT, 'billing_attestations is append-only'); END;
+        CREATE TRIGGER billing_attestations_append_only_d BEFORE DELETE ON billing_attestations BEGIN SELECT RAISE(ABORT, 'billing_attestations is append-only'); END;
+
+        -- Paper trading. One data origin per account so fixture and live P&L never blend (spec 8.1).
+        CREATE TABLE paper_accounts (
+            id             INTEGER PRIMARY KEY,
+            name           TEXT NOT NULL UNIQUE,
+            data_origin    TEXT NOT NULL,
+            created_at     TEXT NOT NULL,
+            starting_cash  TEXT NOT NULL
+        );
+
+        -- Every evaluation, including abstentions, so coverage and rejection reasons are reportable (spec 8.3).
+        CREATE TABLE paper_decisions (
+            id                   INTEGER PRIMARY KEY,
+            account_id           INTEGER NOT NULL REFERENCES paper_accounts(id),
+            decision_id          TEXT NOT NULL,
+            strategy             TEXT NOT NULL,
+            config_hash          TEXT NOT NULL,
+            snapshot_id          INTEGER NOT NULL REFERENCES market_snapshots(id),
+            data_origin          TEXT NOT NULL,
+            model_id             TEXT,
+            forecast_probability TEXT,
+            forecast_uncertainty TEXT,
+            fee_schedule_id      TEXT,
+            outcome              TEXT NOT NULL CHECK (outcome IN ('abstain','candidates')),
+            rationale            TEXT NOT NULL,
+            created_at           TEXT NOT NULL,
+            UNIQUE (account_id, decision_id)
+        );
+
+        CREATE TABLE paper_orders (
+            id                   INTEGER PRIMARY KEY,
+            account_id           INTEGER NOT NULL REFERENCES paper_accounts(id),
+            decision_row_id      INTEGER NOT NULL REFERENCES paper_decisions(id),
+            client_order_id      TEXT NOT NULL UNIQUE,
+            signal_key           TEXT NOT NULL,
+            strategy             TEXT NOT NULL,
+            ticker               TEXT NOT NULL,
+            event_ticker         TEXT NOT NULL,
+            side                 TEXT NOT NULL CHECK (side IN ('yes','no')),
+            action               TEXT NOT NULL CHECK (action IN ('buy','sell')),
+            quantity             INTEGER NOT NULL CHECK (quantity > 0),
+            limit_price          TEXT NOT NULL,
+            time_in_force        TEXT NOT NULL CHECK (time_in_force = 'ioc'),
+            fee_schedule_id      TEXT,
+            fee_coefficient      TEXT,
+            fee_multiplier       TEXT,
+            decision_snapshot_id INTEGER NOT NULL REFERENCES market_snapshots(id),
+            data_origin          TEXT NOT NULL,
+            created_at           TEXT NOT NULL,
+            arrival_at           TEXT NOT NULL,
+            status               TEXT NOT NULL CHECK (status IN ('rejected','pending','filled','partially_filled','unfilled','expired_no_evidence')),
+            filled_quantity      INTEGER NOT NULL DEFAULT 0,
+            fill_snapshot_id     INTEGER REFERENCES market_snapshots(id),
+            resolved_at          TEXT,
+            reasons              TEXT
+        );
+        -- One entry per economic signal (spec 7.2, AC-20). Rejected or unfilled attempts do not consume the signal.
+        CREATE UNIQUE INDEX ux_paper_orders_signal_entry ON paper_orders (account_id, signal_key)
+            WHERE status IN ('pending','filled','partially_filled');
+
+        -- Worst-case cost held from intent until the simulated outcome is known (spec 6.1, AC-06).
+        CREATE TABLE risk_reservations (
+            id           INTEGER PRIMARY KEY,
+            account_id   INTEGER NOT NULL REFERENCES paper_accounts(id),
+            order_id     INTEGER NOT NULL UNIQUE REFERENCES paper_orders(id),
+            amount       TEXT NOT NULL,
+            status       TEXT NOT NULL CHECK (status IN ('held','resolved')),
+            consumed     TEXT NOT NULL DEFAULT '0',
+            created_at   TEXT NOT NULL,
+            resolved_at  TEXT
+        );
+
+        CREATE TABLE paper_fills (
+            id          INTEGER PRIMARY KEY,
+            order_id    INTEGER NOT NULL REFERENCES paper_orders(id),
+            snapshot_id INTEGER NOT NULL REFERENCES market_snapshots(id),
+            ticker      TEXT NOT NULL,
+            side        TEXT NOT NULL,
+            action      TEXT NOT NULL,
+            quantity    INTEGER NOT NULL CHECK (quantity > 0),
+            price       TEXT NOT NULL,
+            fee         TEXT NOT NULL,
+            filled_at   TEXT NOT NULL,
+            simulated   INTEGER NOT NULL CHECK (simulated = 1)
+        );
+        CREATE TRIGGER paper_fills_append_only_u BEFORE UPDATE ON paper_fills BEGIN SELECT RAISE(ABORT, 'paper_fills is append-only'); END;
+        CREATE TRIGGER paper_fills_append_only_d BEFORE DELETE ON paper_fills BEGIN SELECT RAISE(ABORT, 'paper_fills is append-only'); END;
+
+        -- Append-only journal. Cash = sum(cash_delta); position(ticker, side) = sum(quantity_delta).
+        CREATE TABLE ledger_entries (
+            id              INTEGER PRIMARY KEY,
+            account_id      INTEGER NOT NULL REFERENCES paper_accounts(id),
+            ts              TEXT NOT NULL,
+            kind            TEXT NOT NULL CHECK (kind IN ('deposit','trade','fee','settlement')),
+            ticker          TEXT,
+            side            TEXT CHECK (side IS NULL OR side IN ('yes','no')),
+            quantity_delta  INTEGER NOT NULL DEFAULT 0,
+            cash_delta      TEXT NOT NULL,
+            cost_delta      TEXT NOT NULL DEFAULT '0',
+            ref_kind        TEXT,
+            ref_id          INTEGER,
+            memo            TEXT
+        );
+        CREATE INDEX ix_ledger_entries_account ON ledger_entries (account_id, id);
+        CREATE TRIGGER ledger_entries_append_only_u BEFORE UPDATE ON ledger_entries BEGIN SELECT RAISE(ABORT, 'ledger_entries is append-only'); END;
+        CREATE TRIGGER ledger_entries_append_only_d BEFORE DELETE ON ledger_entries BEGIN SELECT RAISE(ABORT, 'ledger_entries is append-only'); END;
+
+        CREATE TABLE paper_settlements (
+            account_id   INTEGER NOT NULL REFERENCES paper_accounts(id),
+            ticker       TEXT NOT NULL,
+            result       TEXT NOT NULL CHECK (result IN ('yes','no')),
+            settled_at   TEXT NOT NULL,
+            snapshot_id  INTEGER NOT NULL REFERENCES market_snapshots(id),
+            PRIMARY KEY (account_id, ticker)
+        );
+
+        -- Opening marked equity per America/Chicago reporting day (spec 6.3).
+        CREATE TABLE paper_daily_equity (
+            account_id     INTEGER NOT NULL REFERENCES paper_accounts(id),
+            reporting_day  TEXT NOT NULL,
+            opening_equity TEXT NOT NULL,
+            recorded_at    TEXT NOT NULL,
+            PRIMARY KEY (account_id, reporting_day)
+        );
+        """),
     ];
 
     public static int LatestVersion => Migrations[^1].Version;

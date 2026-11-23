@@ -14,28 +14,32 @@ public sealed record LedgerEntry(long Id, long AccountId, DateTimeOffset Ts, str
 /// </summary>
 public sealed class PaperLedger(Db db, TimeProvider time)
 {
-    public long EnsureAccount(string name, decimal startingCash)
+    /// <summary>Creates (or returns) a paper account bound to one data origin, so fixture and live P&amp;L never blend.</summary>
+    public long EnsureAccount(string name, decimal startingCash, string dataOrigin)
     {
         if (startingCash <= 0m) throw new KalshiBotException("Starting paper cash must be positive.");
         return db.InTransaction(() =>
         {
-            var existing = db.QuerySingle("SELECT id, starting_cash FROM paper_accounts WHERE name = $n",
-                r => new { Id = r.L("id"), Cash = r.D("starting_cash") }, ("$n", name));
+            var existing = db.QuerySingle("SELECT id, starting_cash, data_origin FROM paper_accounts WHERE name = $n",
+                r => new { Id = r.L("id"), Cash = r.D("starting_cash"), Origin = r.S("data_origin") }, ("$n", name));
             if (existing is not null)
             {
-                if (existing.Cash != startingCash)
-                    throw new KalshiBotException($"Paper account '{name}' already exists with starting cash {Dec.ToText(existing.Cash)}.");
+                if (existing.Cash != startingCash || existing.Origin != dataOrigin)
+                    throw new KalshiBotException($"Paper account '{name}' already exists ({Dec.Show(existing.Cash)}, {existing.Origin}).");
                 return existing.Id;
             }
-            var now = Ts.ToText(time.GetUtcNow());
-            var id = db.Insert("INSERT INTO paper_accounts (name, created_at, starting_cash) VALUES ($n, $t, $c)",
-                ("$n", name), ("$t", now), ("$c", Dec.ToText(startingCash)));
+            var id = db.Insert("INSERT INTO paper_accounts (name, data_origin, created_at, starting_cash) VALUES ($n, $o, $t, $c)",
+                ("$n", name), ("$o", dataOrigin), ("$t", Ts.ToText(time.GetUtcNow())), ("$c", Dec.ToText(startingCash)));
             Append(id, "deposit", null, null, 0, startingCash, 0m, "account", id, "PAPER starting cash");
             return id;
         });
     }
 
     public long? FindAccount(string name) => db.Scalar<long?>("SELECT id FROM paper_accounts WHERE name = $n", ("$n", name));
+
+    public string DataOrigin(long accountId) =>
+        db.Scalar<string>("SELECT data_origin FROM paper_accounts WHERE id = $a", ("$a", accountId))
+        ?? throw new KalshiBotException($"Paper account {accountId} not found.");
 
     public List<(long Id, string Name)> Accounts() =>
         db.Query("SELECT id, name FROM paper_accounts ORDER BY id", r => (r.L("id"), r.S("name")));
@@ -48,11 +52,10 @@ public sealed class PaperLedger(Db db, TimeProvider time)
 
     public AccountState State(long accountId, bool halted)
     {
-        var acct = db.QuerySingle("SELECT name, starting_cash FROM paper_accounts WHERE id = $a",
-            r => new { Name = r.S("name"), Cash = r.D("starting_cash") }, ("$a", accountId))
+        var acct = db.QuerySingle("SELECT name, starting_cash, data_origin FROM paper_accounts WHERE id = $a",
+            r => new { Name = r.S("name"), Cash = r.D("starting_cash"), Origin = r.S("data_origin") }, ("$a", accountId))
             ?? throw new KalshiBotException($"Paper account {accountId} not found.");
         var entries = Entries(accountId);
-        var dayStart = new DateTimeOffset(time.GetUtcNow().UtcDateTime.Date, TimeSpan.Zero);
 
         var positions = entries.Where(e => e.Ticker is not null && e.Side is not null)
             .GroupBy(e => (e.Ticker!, e.Side!))
@@ -61,9 +64,34 @@ public sealed class PaperLedger(Db db, TimeProvider time)
             .OrderBy(p => p.Ticker, StringComparer.Ordinal).ThenBy(p => p.Side, StringComparer.Ordinal)
             .ToList();
 
-        var todayPremium = -entries.Where(e => e.Ts >= dayStart && e.Kind is "trade" or "fee" && e.CashDelta < 0m).Sum(e => e.CashDelta);
+        var held = db.Query("""
+            SELECT o.ticker, o.event_ticker, r.amount FROM risk_reservations r JOIN paper_orders o ON o.id = r.order_id
+            WHERE r.account_id = $a AND r.status = 'held'
+            """, r => (Ticker: r.S("ticker"), Event: r.S("event_ticker"), Amount: r.D("amount")), ("$a", accountId));
+        var eventOf = db.Query("SELECT DISTINCT ticker, event_ticker FROM paper_orders WHERE account_id = $a",
+            r => (r.S("ticker"), r.S("event_ticker")), ("$a", accountId)).ToDictionary(x => x.Item1, x => x.Item2);
+
+        var byTicker = new Dictionary<string, decimal>(StringComparer.Ordinal);
+        var byEvent = new Dictionary<string, decimal>(StringComparer.Ordinal);
+        void Add(string ticker, string? evt, decimal amount)
+        {
+            byTicker[ticker] = byTicker.GetValueOrDefault(ticker) + amount;
+            // Unknown grouping is not independence: fall back to a shared bucket (spec 5.3).
+            var bucket = evt ?? "(unknown event)";
+            byEvent[bucket] = byEvent.GetValueOrDefault(bucket) + amount;
+        }
+        foreach (var p in positions) Add(p.Ticker, eventOf.GetValueOrDefault(p.Ticker), p.CostBasis);
+        foreach (var h in held) Add(h.Ticker, h.Event, h.Amount);
+
+        var dayStart = Ts.ToText(ReportingDay.StartUtc(ReportingDay.For(time.GetUtcNow())));
+        var entriesToday = (int)db.Scalar<long>(
+            "SELECT COUNT(*) FROM paper_orders WHERE account_id = $a AND action = 'buy' AND status <> 'rejected' AND created_at >= $d",
+            ("$a", accountId), ("$d", dayStart));
+        var openOrders = (int)db.Scalar<long>("SELECT COUNT(*) FROM paper_orders WHERE account_id = $a AND status = 'pending'", ("$a", accountId));
         var realized = entries.Where(e => e.Kind != "deposit").Sum(e => e.CashDelta + e.CostDelta);
-        return new AccountState(accountId, acct.Name, acct.Cash, entries.Sum(e => e.CashDelta), positions, todayPremium, realized, halted);
+
+        return new AccountState(accountId, acct.Name, acct.Origin, acct.Cash, entries.Sum(e => e.CashDelta), positions,
+            held.Sum(h => h.Amount), byTicker, byEvent, entriesToday, openOrders, realized, halted);
     }
 
     /// <summary>Records one simulated fill: a trade entry and a fee entry. Must run inside the caller's transaction.</summary>
@@ -81,7 +109,7 @@ public sealed class PaperLedger(Db db, TimeProvider time)
             var costOut = CostOut(heldQty, heldCost, qty);
             Append(accountId, "trade", ticker, side, -qty, qty * price, -costOut, "fill", fillId, $"PAPER sell {qty} {side} @ {Dec.ToText(price)} (simulated)");
         }
-        if (fee > 0m) Append(accountId, "fee", ticker, side, 0, -fee, 0m, "fill", fillId, $"PAPER fee ({FeeModel.Description})");
+        if (fee > 0m) Append(accountId, "fee", ticker, side, 0, -fee, 0m, "fill", fillId, "PAPER fee (simulated taker fee)");
     }
 
     /// <summary>
@@ -94,10 +122,10 @@ public sealed class PaperLedger(Db db, TimeProvider time)
         var already = db.Scalar<long>("SELECT COUNT(*) FROM paper_settlements WHERE account_id = $a AND ticker = $t",
             ("$a", accountId), ("$t", snapshot.Ticker));
         if (already > 0) return 0;
-        var origins = PositionOrigins(accountId, snapshot.Ticker);
-        if (origins.Any(o => o != snapshot.DataOrigin))
+        var origin = DataOrigin(accountId);
+        if (origin != snapshot.DataOrigin)
             throw new KalshiBotException(
-                $"Refusing to settle {snapshot.Ticker}: position came from {string.Join(", ", origins)} data but the finalized snapshot is {snapshot.DataOrigin}.");
+                $"Refusing to settle {snapshot.Ticker}: account holds {origin} data but the finalized snapshot is {snapshot.DataOrigin}.");
 
         var settled = 0;
         foreach (var side in new[] { Side.Yes, Side.No })
@@ -159,6 +187,22 @@ public sealed class PaperLedger(Db db, TimeProvider time)
             if (linked.Count(e => e.Kind == "trade") != 1) problems.Add($"fill {f.Id}: expected exactly one trade entry");
             if (-linked.Where(e => e.Kind == "fee").Sum(e => e.CashDelta) != f.Fee) problems.Add($"fill {f.Id}: fee entries do not sum to the fill fee");
         }
+
+        // Reservations: pending orders hold exactly one; resolved ones consumed exactly their fills' cost.
+        foreach (var o in db.Query("""
+                     SELECT o.id, o.status, r.status AS rstatus, r.amount, r.consumed FROM paper_orders o
+                     LEFT JOIN risk_reservations r ON r.order_id = o.id WHERE o.account_id = $a AND o.status <> 'rejected'
+                     """, r => (Id: r.L("id"), Status: r.S("status"), RStatus: r.Str("rstatus"), Amount: r.DN("amount"), Consumed: r.DN("consumed")),
+                     ("$a", accountId)))
+        {
+            if (o.RStatus is null) { problems.Add($"order {o.Id}: no risk reservation"); continue; }
+            if ((o.Status == "pending") != (o.RStatus == "held")) problems.Add($"order {o.Id}: status '{o.Status}' with reservation '{o.RStatus}'");
+            var cost = fills.Values.Where(f => f.OrderId == o.Id).Sum(f => f.Quantity * f.Price + f.Fee);
+            if (o.RStatus == "resolved" && o.Consumed != cost) problems.Add($"order {o.Id}: reservation consumed {o.Consumed} but fills cost {Dec.ToText(cost)}");
+            if (o.Consumed > o.Amount) problems.Add($"order {o.Id}: consumed more than reserved");
+        }
+        if (db.Scalar<long>("SELECT COUNT(*) FROM risk_reservations r JOIN paper_orders o ON o.id = r.order_id WHERE r.account_id = $a AND o.status = 'rejected'", ("$a", accountId)) > 0)
+            problems.Add("rejected order holds a reservation");
 
         var settlements = db.Query("SELECT ticker, result, snapshot_id FROM paper_settlements WHERE account_id = $a",
             r => (Ticker: r.S("ticker"), Result: r.S("result"), Snapshot: r.L("snapshot_id")), ("$a", accountId)).ToDictionary(x => x.Ticker);
@@ -228,11 +272,6 @@ public sealed class PaperLedger(Db db, TimeProvider time)
     /// <summary>Average-cost removal for a partial close; a full close removes exactly the remaining cost.</summary>
     internal static decimal CostOut(long heldQty, decimal heldCost, long qty) =>
         qty == heldQty ? heldCost : Math.Round(heldCost * qty / heldQty, 6, MidpointRounding.ToEven);
-
-    /// <summary>Data origins of the filled paper orders in this market for this account.</summary>
-    public IReadOnlyCollection<string> PositionOrigins(long accountId, string ticker) =>
-        db.Query("SELECT DISTINCT data_origin FROM paper_orders WHERE account_id = $a AND ticker = $t AND filled_quantity > 0 ORDER BY data_origin",
-            r => r.S("data_origin"), ("$a", accountId), ("$t", ticker));
 
     private (long Qty, decimal Cost) Holding(long accountId, string ticker, string side)
     {

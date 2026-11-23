@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using KalshiBot.Core.Common;
 using KalshiBot.Core.Storage;
 
@@ -9,18 +10,31 @@ public sealed record ClaudeRunOptions
 {
     public string ClaudePath { get; init; } = "claude";
     public string? Model { get; init; }
-    public TimeSpan Timeout { get; init; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>Process timeout per research batch (spec 4.3 initial target: five minutes).</summary>
+    public TimeSpan Timeout { get; init; } = TimeSpan.FromMinutes(5);
 
     /// <summary>Managed settings directory; null = the OS default documented at code.claude.com/docs/en/managed-settings.</summary>
     public string? ManagedSettingsDir { get; init; }
+
+    /// <summary>Lock file enforcing one research process at a time; null = next to the database.</summary>
+    public string? LockPath { get; init; }
+
+    /// <summary>How long an operator attestation that usage credits are disabled stays acceptable.</summary>
+    public TimeSpan AttestationMaxAge { get; init; } = TimeSpan.FromDays(30);
+
+    /// <summary>Re-run even if this packet already has a CLI research record for the current prompt version.</summary>
+    public bool Force { get; init; }
 }
 
 public sealed record ClaudeRunResult(long RunId, string Outcome, AuthVerdict Verdict, ImportOutcome? Imported, string Detail);
 
 /// <summary>
-/// Manual, one-packet-at-a-time research round trip through the official Claude Code CLI under the user's
-/// subscription login. Order of operations: sanitize env -> verify auth -> run `claude -p` in an empty temp
-/// directory with only web tools -> strict import. Every attempt, including refusals, is audited in research_runs.
+/// Manual, one-packet research round trip through the official Claude Code CLI under the user's subscription
+/// (spec 4.1-4.4). Every step fails closed and every attempt is audited in research_runs:
+/// cache check -> owner attestation (usage credits off) -> single-run lock -> allowlisted env -> settings inspection ->
+/// clean temp workspace -> CLI version -> `claude auth status` -> `claude -p` (web tools only, bounded time) ->
+/// packet linkage check -> strict import. Quota exhaustion or any error ends the run; there is no retry or fallback.
 /// </summary>
 public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunner processes, ClaudeRunOptions? options = null)
 {
@@ -32,86 +46,107 @@ public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunne
 
     public async Task<ClaudeRunResult> RunAsync(string packetId, IReadOnlyDictionary<string, string> parentEnv, CancellationToken ct = default)
     {
-        var packet = new ResearchStore(db).Packet(packetId) ?? throw new KalshiBotException($"Unknown packet {packetId}.");
+        var store = new ResearchStore(db);
+        var packet = store.Packet(packetId) ?? throw new KalshiBotException($"Unknown packet {packetId}.");
         var started = time.GetUtcNow();
+        var none = new AuthVerdict(false, null, null, []);
+
+        if (!_o.Force && store.HasCliRecordFor(packetId, ResearchContract.PromptVersion))
+            return Audit(packetId, started, "skipped", none, null, "unchanged packet already researched with this prompt version (use --force to re-run)", null, null);
+
+        var attestation = store.LatestAttestation();
+        if (attestation is null || started - attestation.AttestedAt > _o.AttestationMaxAge)
+            return Audit(packetId, started, "refused", none, null,
+                attestation is null
+                    ? "owner has not attested that usage credits/extra usage are disabled; check claude.ai billing settings, then run 'kb research attest-billing'"
+                    : $"usage-credit attestation from {Ts.ToText(attestation.AttestedAt)} is older than {_o.AttestationMaxAge.TotalDays} days; re-check and re-attest",
+                null, null);
+
+        using var runLock = ProcessLock.TryAcquire(_o.LockPath ?? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(db.Path))!, ".locks", "research.lock"));
+        if (runLock is null)
+            return Audit(packetId, started, "refused", none, null, "another research process is running (one at a time)", null, null);
+
         var env = BillingGuard.SanitizedEnvironment(parentEnv, out var removed);
         var billingRemoved = removed.Where(BillingGuard.IsBillingSwitch).ToList();
-        var removedNote = removed.Count == 0 ? "" :
+        var envNote = removed.Count == 0 ? "" :
             $"child env: dropped {removed.Count} non-allowlisted variable(s)" +
             (billingRemoved.Count == 0 ? ". " : $", including billing-relevant {string.Join(", ", billingRemoved)}. ");
 
         var settingsReasons = BillingGuard.InspectSettings(SettingsFiles(env));
         if (settingsReasons.Count > 0)
-        {
-            var v = new AuthVerdict(false, null, null, settingsReasons);
-            return Audit(packetId, started, "refused", v, removedNote + string.Join("; ", settingsReasons), null, null);
-        }
+            return Audit(packetId, started, "refused", none with { Reasons = settingsReasons }, null, envNote + string.Join("; ", settingsReasons), null, null);
 
         var workDir = Directory.CreateTempSubdirectory("kalshibot-research-").FullName;
         try
         {
             if (InsideGitRepository(workDir))
-            {
-                var v = new AuthVerdict(false, null, null, ["temp directory is inside a git repository; project settings could load"]);
-                return Audit(packetId, started, "refused", v, removedNote + v.Reasons[0], null, null);
-            }
+                return Audit(packetId, started, "refused", none, null, envNote + "temp directory is inside a git repository; project settings could load", null, null);
 
-            ProcessResult status;
+            ProcessResult versionRun;
             try
             {
-                status = await processes.RunAsync(new ProcessSpec(_o.ClaudePath, ["auth", "status"], env, workDir, null, TimeSpan.FromSeconds(60)), ct);
+                versionRun = await processes.RunAsync(new ProcessSpec(_o.ClaudePath, ["--version"], env, workDir, null, TimeSpan.FromSeconds(60)), ct);
             }
             catch (System.ComponentModel.Win32Exception e)
             {
-                var v = new AuthVerdict(false, null, null, [$"could not start '{_o.ClaudePath}': {e.Message}"]);
-                return Audit(packetId, started, "refused", v, removedNote + string.Join("; ", v.Reasons), null, null);
+                return Audit(packetId, started, "refused", none, null, envNote + $"could not start '{_o.ClaudePath}': {e.Message}", null, null);
             }
+            var cliVersion = Regex.Match(versionRun.Stdout, @"\b\d+\.\d+\.\d+\b") is { Success: true } m ? m.Value : null;
+            if (versionRun.ExitCode != 0 || cliVersion is null)
+                return Audit(packetId, started, "refused", none, null, envNote + "could not determine the installed Claude Code version", null, null);
 
+            var status = await processes.RunAsync(new ProcessSpec(_o.ClaudePath, ["auth", "status"], env, workDir, null, TimeSpan.FromSeconds(60)), ct);
             var verdict = status.TimedOut
                 ? new AuthVerdict(false, null, null, ["`claude auth status` timed out"])
                 : BillingGuard.Evaluate(status.Stdout, env);
             if (!verdict.Allowed)
-                return Audit(packetId, started, "refused", verdict, removedNote + string.Join("; ", verdict.Reasons), null, null);
+                return Audit(packetId, started, "refused", verdict, cliVersion, envNote + string.Join("; ", verdict.Reasons), null, null);
 
             var args = BuildArguments();
             if (args.Any(a => BillingGuard.ForbiddenArguments.Contains(a)))
                 throw new InvalidOperationException("Refusing to run Claude with a billing-bypass argument.");
 
             var run = await processes.RunAsync(new ProcessSpec(_o.ClaudePath, args, env, workDir, packet.Json, _o.Timeout), ct);
-            if (run.TimedOut) return Audit(packetId, started, "failed", verdict, removedNote + "claude -p timed out", run.Stdout, null);
+            if (run.TimedOut) return Audit(packetId, started, "failed", verdict, cliVersion, envNote + $"claude -p exceeded the {_o.Timeout} timeout", run.Stdout, null);
 
             string structured;
+            string? observedModel = null;
             try
             {
                 using var doc = JsonDocument.Parse(run.Stdout);
                 var root = doc.RootElement;
                 if (root.TryGetProperty("is_error", out var err) && err.ValueKind == JsonValueKind.True)
-                    return Audit(packetId, started, "failed", verdict, removedNote + $"claude reported an error (exit {run.ExitCode})", run.Stdout, null);
+                {
+                    var message = root.TryGetProperty("result", out var res) && res.ValueKind == JsonValueKind.String ? res.GetString() : null;
+                    return Audit(packetId, started, "failed", verdict, cliVersion,
+                        envNote + $"claude reported an error (exit {run.ExitCode}); research suspended, no retry: {Trim(message)}", run.Stdout, null);
+                }
+                if (root.TryGetProperty("modelUsage", out var usage) && usage.ValueKind == JsonValueKind.Object)
+                    observedModel = string.Join(",", usage.EnumerateObject().Select(p => p.Name).Order(StringComparer.Ordinal));
                 if (!root.TryGetProperty("structured_output", out var so) || so.ValueKind != JsonValueKind.Object)
-                    return Audit(packetId, started, "failed", verdict, removedNote + "no structured_output in claude result (declined or schema not met)", run.Stdout, null);
-                // The result must answer the packet that was run; web content must not redirect it to another market.
-                var answered = so.TryGetProperty("packet_id", out var pid) && pid.ValueKind == JsonValueKind.String ? pid.GetString() : null;
-                var ticker = so.TryGetProperty("ticker", out var tk) && tk.ValueKind == JsonValueKind.String ? tk.GetString() : null;
-                if (answered != packet.PacketId || ticker != packet.Ticker)
-                    return Audit(packetId, started, "failed", verdict,
-                        removedNote + $"result answers packet '{answered}' / ticker '{ticker}', not the packet that was run", run.Stdout, null);
+                    return Audit(packetId, started, "failed", verdict, cliVersion, envNote + "no structured_output in claude result (declined or schema not met)", run.Stdout, null);
+                // The record must answer the packet that was run; web content must not redirect it to another market.
+                string? Str(string k) => so.TryGetProperty(k, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+                if (Str("packetId") != packet.PacketId || Str("packetHash") != packet.PacketHash || Str("marketTicker") != packet.MarketTicker)
+                    return Audit(packetId, started, "failed", verdict, cliVersion,
+                        envNote + $"record answers packet '{Str("packetId")}' / '{Str("marketTicker")}', not the packet that was run", run.Stdout, null);
                 structured = so.GetRawText();
             }
             catch (JsonException)
             {
-                return Audit(packetId, started, "failed", verdict, removedNote + $"claude output was not JSON (exit {run.ExitCode})", run.Stdout, null);
+                return Audit(packetId, started, "failed", verdict, cliVersion, envNote + $"claude output was not JSON (exit {run.ExitCode})", run.Stdout, null);
             }
 
             try
             {
-                var imported = new ResultImporter(db, time).Import(structured, "claude-subscription-cli");
-                return Audit(packetId, started, "imported", verdict,
-                    removedNote + (imported.AlreadyImported ? "identical result already imported" : "imported as EXPERIMENTAL (unvalidated)"),
+                var imported = new ResearchImporter(db, time).Import(structured, "claude-subscription-cli", cliVersion, observedModel);
+                return Audit(packetId, started, "imported", verdict, cliVersion,
+                    envNote + (imported.AlreadyImported ? "identical record already imported" : "imported as EXPERIMENTAL research (unvalidated)"),
                     run.Stdout, imported);
             }
-            catch (ResultRejectedException e)
+            catch (ResearchRejectedException e)
             {
-                return Audit(packetId, started, "failed", verdict, removedNote + e.Message, run.Stdout, null);
+                return Audit(packetId, started, "failed", verdict, cliVersion, envNote + e.Message, run.Stdout, null);
             }
         }
         finally
@@ -155,17 +190,17 @@ public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunne
     }
 
     /// <summary>
-    /// Flags verified against Claude Code 2.1.330 `--help` and code.claude.com/docs/en/headless.
-    /// The prompt comes first so variadic options cannot swallow it; the packet arrives on stdin.
-    /// No --bare (it ignores subscription OAuth). Only web tools; no file, shell, MCP, or slash commands.
+    /// Flags verified against Claude Code 2.1.330 `--help` and code.claude.com/docs/en/headless. 2.1.330 has no
+    /// max-turns flag, so the bound is the process timeout plus a web-only tool set. The prompt comes first so variadic
+    /// options cannot swallow it; the packet arrives on stdin. No --bare (it ignores subscription OAuth).
     /// </summary>
     internal List<string> BuildArguments()
     {
         var args = new List<string>
         {
-            "-p", "Research the Kalshi market in the JSON packet on stdin. Follow its \"task\" field exactly and return the result object.",
+            "-p", "Review the Kalshi market in the JSON packet on stdin. Follow its \"task\" field exactly and return the research record.",
             "--output-format", "json",
-            "--json-schema", ResearchContract.ResultJsonSchema,
+            "--json-schema", ResearchContract.PortableSchemaJson,
             "--no-session-persistence",
             "--strict-mcp-config",
             "--disable-slash-commands",
@@ -176,17 +211,19 @@ public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunne
         return args;
     }
 
-    private ClaudeRunResult Audit(string packetId, DateTimeOffset started, string outcome, AuthVerdict verdict, string detail,
-        string? stdout, ImportOutcome? imported)
+    private static string Trim(string? s) => s is null ? "(no message)" : s.Length <= 300 ? s : s[..300] + "…";
+
+    private ClaudeRunResult Audit(string packetId, DateTimeOffset started, string outcome, AuthVerdict verdict, string? cliVersion,
+        string detail, string? stdout, ImportOutcome? imported)
     {
         var id = db.Insert("""
-            INSERT INTO research_runs (packet_id, started_at, finished_at, outcome, auth_method, subscription_type, detail,
-                stdout_sha256, stdout, research_result_id)
-            VALUES ($p, $s, $f, $o, $am, $st, $d, $sh, $out, $rr)
+            INSERT INTO research_runs (packet_id, started_at, finished_at, outcome, auth_method, subscription_type, cli_version, detail,
+                stdout_sha256, stdout, research_record_id)
+            VALUES ($p, $s, $f, $o, $am, $st, $cv, $d, $sh, $out, $rr)
             """,
             ("$p", packetId), ("$s", Ts.ToText(started)), ("$f", Ts.ToText(time.GetUtcNow())), ("$o", outcome),
-            ("$am", verdict.AuthMethod), ("$st", verdict.SubscriptionType), ("$d", detail),
-            ("$sh", stdout is null ? null : Hash.Sha256Hex(stdout)), ("$out", stdout), ("$rr", imported?.ResultId));
+            ("$am", verdict.AuthMethod), ("$st", verdict.SubscriptionType), ("$cv", cliVersion), ("$d", detail),
+            ("$sh", stdout is null ? null : Hash.Sha256Hex(stdout)), ("$out", stdout), ("$rr", imported?.RecordId));
         return new ClaudeRunResult(id, outcome, verdict, imported, detail);
     }
 }

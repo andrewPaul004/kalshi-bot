@@ -1,0 +1,5 @@
+{
+  "_note": "SYNTHETIC fixture model for the frozen replay and tests. Hand-written numbers, not forecasts. Only applies to fixture:synthetic data.",
+  "KXSYNTHWX-99DEC31-T50": { "probability_yes": "0.60", "uncertainty": "0.05" },
+  "KXSYNTHWX-99DEC31-T60": { "probability_yes": "0.17", "uncertainty": "0.05" }
+}

@@ -12,39 +12,43 @@ namespace KalshiBot.Cli;
 
 public static class Commands
 {
-    private static readonly HashSet<string> Flags = ["demo"];
+    private static readonly HashSet<string> Flags = ["demo", "force", "usage-credits-disabled"];
     private const string DefaultAccount = "paper";
     private static readonly TimeProvider Clock = TimeProvider.System;
 
     public const string Usage = """
         kb — Kalshi research + paper trading (OBSERVE/PAPER only; no live execution exists)
+        spec: kalshi-claude-subscription-spec.md
 
-        global:  --db PATH            SQLite file (default $KALSHIBOT_DB or data/kalshibot.db)
+        global:  --db PATH            SQLite file (default $KALSHIBOT_DB or data/kalshibot.db). One data origin per file.
 
         watch add TICKER...           add markets to record          watch list | watch remove TICKER
         discover --series SERIES      list open tickers in a series (live, read-only, not stored) [--demo]
         record                        record watched markets once from Kalshi production (public endpoints)
-               [--demo]               ...from Kalshi demo instead
-               [--fixtures DIR]       ...from SYNTHETIC fixture files instead
+               [--demo]               ...from Kalshi demo instead (use a separate --db)
+               [--fixtures DIR]       ...from SYNTHETIC fixture files instead (use a separate --db)
                [--ticker T]...        ...these tickers instead of the watchlist
                [--repeat N --interval SECONDS]
         markets                       latest snapshot per market
         rules TICKER                  rules versions recorded for a market
 
-        research export TICKER [--out DIR]          write packet JSON + manual prompt (default data/research)
-        research import FILE [--source manual|synthetic-fixture]
-        research run PACKET_ID [--claude PATH] [--model NAME]   manual Claude round trip (subscription only)
+        research export TICKER [--out DIR]          packet JSON + paste-ready prompt (default data/research)
+        research import FILE [--source manual|synthetic-fixture]   strict import of a research record
+        research attest-billing --usage-credits-disabled            record that YOU checked usage credits are off
+        research run PACKET_ID [--claude PATH] [--model NAME] [--force]   one guarded subscription round trip
         research list
 
-        paper init [--account NAME] [--cash AMOUNT]  create paper account (default 'paper', 100.00)
-        paper run TICKER [--account NAME] [--min-edge X]   strategy -> risk -> simulated fill
+        paper init [--account NAME] [--cash AMOUNT]  paper account bound to this db's data origin (default 500.00)
+        paper run TICKER [--account NAME] [--min-edge X] [--series S]...
+                                      decide -> risk -> reserve; fills only on a later observation (paper resolve)
+        paper resolve [--account NAME]               fill/expire pending orders against post-arrival observations
         paper settle [--account NAME]                settle finalized markets
-        paper verify [--account NAME]                recompute ledger invariants
-        halt REASON | resume                         kill switch
+        paper verify [--account NAME]                rebuild and check the ledger
+        halt REASON | resume                         safety halt (persists across restarts and days)
 
         status [--html FILE]          text status, or write the HTML status page
         serve [--port 5080]           serve the status page on http://127.0.0.1:PORT (read-only)
-        demo [--db PATH]              offline end-to-end run on SYNTHETIC fixtures (resets that db)
+        replay [--db PATH]            frozen SYNTHETIC fixture replay, deterministic (alias: demo)
         """;
 
     public static async Task<int> RunAsync(string[] argv)
@@ -55,7 +59,7 @@ public static class Commands
         var cmd = a.Positionals[0];
         var sub = a.Positionals.Count > 1 ? a.Positionals[1] : null;
 
-        if (cmd == "demo") return await Demo.RunAsync(a);
+        if (cmd is "replay" or "demo") return Demo.Run(a);
 
         using var db = Db.Open(dbPath);
         switch (cmd)
@@ -228,18 +232,30 @@ public static class Commands
                 if (source == "claude-subscription-cli") throw new UsageException("That source kind is reserved for 'kb research run'.");
                 try
                 {
-                    var r = new ResultImporter(db, Clock).Import(File.ReadAllText(file), source);
+                    var r = new ResearchImporter(db, Clock).Import(File.ReadAllText(file), source);
                     Console.WriteLine(r.AlreadyImported
-                        ? $"already imported as result #{r.ResultId}"
-                        : $"imported result #{r.ResultId} for {r.Ticker}: p_yes={(r.ProbabilityYes is { } p ? Dec.ToText(p) : "abstained")} — EXPERIMENTAL (unvalidated)");
+                        ? $"already imported as record #{r.RecordId} ({r.ResearchId})"
+                        : $"imported record #{r.RecordId} '{r.ResearchId}' for {r.MarketTicker}: {r.Disposition}" +
+                          (r.ExperimentalProbability is { } p ? $", experimental p_yes={Dec.Show(p)} (scoring only)" : "") + " — EXPERIMENTAL");
                     return 0;
                 }
-                catch (ResultRejectedException e)
+                catch (ResearchRejectedException e)
                 {
                     Console.Error.WriteLine("REJECTED:");
                     foreach (var err in e.Errors) Console.Error.WriteLine($"  - {err}");
                     return 1;
                 }
+            }
+            case "attest-billing":
+            {
+                if (!a.Flag("usage-credits-disabled"))
+                    throw new UsageException("Check claude.ai → Settings → Usage/Billing yourself first, then pass --usage-credits-disabled to record that statement.");
+                a.EnsureAllUsed();
+                var store = new ResearchStore(db);
+                store.Attest(Clock.GetUtcNow());
+                Console.WriteLine($"recorded owner attestation: \"{ResearchStore.UsageCreditsStatement}\" ({Ts.ToText(Clock.GetUtcNow())}).");
+                Console.WriteLine("This is your statement, not a machine verification; re-check and re-attest at least every 30 days.");
+                return 0;
             }
             case "run":
             {
@@ -248,22 +264,25 @@ public static class Commands
                 {
                     ClaudePath = a.Opt("claude") ?? Environment.GetEnvironmentVariable("KALSHIBOT_CLAUDE") ?? "claude",
                     Model = a.Opt("model"),
+                    Force = a.Flag("force"),
                 };
                 a.EnsureAllUsed();
                 var runner = new ClaudeResearchRunner(db, Clock, new ProcessRunner(), opts);
-                Console.WriteLine("checking Claude auth (subscription only; API keys, gateways and cloud providers are refused)...");
+                Console.WriteLine("checking: attestation, single-run lock, environment, settings files, CLI version, `claude auth status` (subscription only)...");
                 var r = await runner.RunAsync(packetId, ClaudeResearchRunner.CurrentEnvironment());
-                Console.WriteLine($"research run #{r.RunId}: {r.Outcome.ToUpperInvariant()} (auth {r.Verdict.AuthMethod ?? "unknown"}{(r.Verdict.SubscriptionType is { } st ? ", " + st : "")})");
+                Console.WriteLine($"research run #{r.RunId}: {r.Outcome.ToUpperInvariant()} (auth {r.Verdict.AuthMethod ?? "not checked"}{(r.Verdict.SubscriptionType is { } st ? ", " + st : "")})");
                 Console.WriteLine($"  {r.Detail}");
                 if (r.Imported is { } imp)
-                    Console.WriteLine($"  result #{imp.ResultId}: p_yes={(imp.ProbabilityYes is { } p ? Dec.ToText(p) : "abstained")} — EXPERIMENTAL (unvalidated)");
-                return r.Outcome == "imported" ? 0 : 1;
+                    Console.WriteLine($"  record #{imp.RecordId} '{imp.ResearchId}': {imp.Disposition}" +
+                                      (imp.ExperimentalProbability is { } p ? $", experimental p_yes={Dec.Show(p)} (scoring only)" : "") + " — EXPERIMENTAL");
+                return r.Outcome is "imported" or "skipped" ? 0 : 1;
             }
             case "list":
                 a.EnsureAllUsed();
-                foreach (var r in new ResearchStore(db).Results(50))
-                    Console.WriteLine($"#{r.Id} {Ts.ToText(r.ImportedAt)} {r.Ticker} p_yes={(r.ProbabilityYes is { } p ? Dec.ToText(p) : "abstained")} " +
-                                      $"conf={r.Confidence} via {r.SourceKind} [{(DataOrigin.IsSynthetic(r.DataOrigin) ? "SYNTHETIC" : r.DataOrigin)}] {r.ValidationStatus}");
+                foreach (var r in new ResearchStore(db).Records(50))
+                    Console.WriteLine($"#{r.Id} {Ts.ToText(r.ImportedAt)} {r.ResearchId} {r.MarketTicker} {r.Disposition} " +
+                                      $"p_yes={(r.ExperimentalProbability is { } p ? Dec.Show(p) + " (scoring only)" : "-")} via {r.SourceKind} " +
+                                      $"[{(DataOrigin.IsSynthetic(r.DataOrigin) ? "SYNTHETIC" : r.DataOrigin)}] valid until {Ts.ToText(r.ValidUntilUtc)}");
                 return 0;
             default: throw new UsageException($"Unknown research subcommand '{sub}'.");
         }
@@ -273,24 +292,40 @@ public static class Commands
     {
         var account = a.Opt("account") ?? DefaultAccount;
         var ledger = new PaperLedger(db, Clock);
+        var origin = DatabaseOrigin.Get(db);
         switch (sub)
         {
             case "init":
             {
-                var cash = Dec.Parse(a.Opt("cash") ?? "100.00");
+                var cash = Dec.Parse(a.Opt("cash") ?? Dec.ToText(RiskLimits.PaperFixture.StartingBankroll));
                 a.EnsureAllUsed();
-                var id = ledger.EnsureAccount(account, cash);
-                Console.WriteLine($"paper account '{account}' (#{id}) with {Dec.ToText(cash)} PAPER dollars");
+                if (origin is null) throw new KalshiBotException("Record data first ('kb record ...') so this database's data origin is known.");
+                var id = ledger.EnsureAccount(account, cash, origin);
+                Console.WriteLine($"paper account '{account}' (#{id}) with {Dec.Show(cash)} PAPER dollars on {(DataOrigin.IsSynthetic(origin) ? "SYNTHETIC" : origin)} data");
                 return 0;
             }
             case "run":
             {
                 var ticker = a.Pos(2, "TICKER");
-                var minEdge = Dec.Parse(a.Opt("min-edge") ?? "0.05");
+                var synthetic = origin is not null && DataOrigin.IsSynthetic(origin);
+                var minEdgeText = a.Opt("min-edge") ?? (synthetic ? "0.05" : null);
+                var series = a.Many("series");
+                if (series.Count == 0 && synthetic) series = ["KXSYNTHWX"];
                 a.EnsureAllUsed();
-                var engine = new PaperEngine(db, Clock, new RiskEngine(RiskLimits.PaperDefaults));
-                var r = engine.Run(account, ticker, new EdgeThresholdStrategy(minEdge));
-                PrintRun(r);
+                if (minEdgeText is null) throw new UsageException("--min-edge is required: thresholds are strategy-specific and must be predeclared (spec 5.4).");
+                IForecastModel model = synthetic ? SyntheticFixtureModel.Load(Path.Combine(Demo.FindFixtures(), "model.json")) : new NoValidatedModel();
+                using var executor = ProcessLock.Acquire(LockPath(db, $"paper-{account}"), $"paper executor for '{account}'");
+                var engine = new PaperEngine(db, Clock, new RiskEngine(RiskLimits.PaperFixture));
+                PrintRun(engine.Run(account, ticker, new EdgeThresholdStrategy(Dec.Parse(minEdgeText), 1, series), model));
+                return 0;
+            }
+            case "resolve":
+            {
+                a.EnsureAllUsed();
+                using var executor = ProcessLock.Acquire(LockPath(db, $"paper-{account}"), $"paper executor for '{account}'");
+                var resolved = new PaperEngine(db, Clock, new RiskEngine(RiskLimits.PaperFixture)).ResolvePending(account);
+                PrintResolved(resolved);
+                if (resolved.Count == 0) Console.WriteLine("nothing to resolve (pending orders wait for an observation at or after their arrival time)");
                 return 0;
             }
             case "settle":
@@ -298,9 +333,8 @@ public static class Commands
                 a.EnsureAllUsed();
                 var id = ledger.FindAccount(account) ?? throw new KalshiBotException($"No paper account '{account}'.");
                 var store = new MarketStore(db);
-                var tickers = ledger.State(id, false).Positions.Select(p => p.Ticker).Distinct().ToList();
                 var n = 0;
-                foreach (var t in tickers)
+                foreach (var t in ledger.State(id, false).Positions.Select(p => p.Ticker).Distinct().ToList())
                     if (store.Latest(t) is { } s && ledger.Settle(id, s) > 0) { n++; Console.WriteLine($"settled {t}: result {s.Result} [{(s.IsSynthetic ? "SYNTHETIC" : s.DataOrigin)}]"); }
                 Console.WriteLine(n == 0 ? "nothing to settle (only markets recorded as 'finalized' with a yes/no result settle)" : $"{n} market(s) settled");
                 return 0;
@@ -317,17 +351,33 @@ public static class Commands
         }
     }
 
+    private static string LockPath(Db db, string name) =>
+        Path.Combine(Path.GetDirectoryName(Path.GetFullPath(db.Path))!, ".locks", $"{Path.GetFileName(db.Path)}.{name}.lock");
+
     internal static void PrintRun(PaperRunResult r)
     {
         var origin = DataOrigin.IsSynthetic(r.DataOrigin) ? "SYNTHETIC" : r.DataOrigin;
+        PrintResolved(r.Resolved);
+        if (r.HaltRaised is { } h) Console.WriteLine($"  SAFETY HALT RAISED: {h}");
         Console.WriteLine($"decision {r.DecisionId[..16]} ({r.StrategyId}) on snapshot #{r.SnapshotId} [{origin}]");
-        Console.WriteLine($"  estimate: {(r.Estimate is { } e ? $"p_yes={Dec.ToText(e.ProbabilityYes)} {e.Label} via {e.SourceKind}" : "none")}");
+        Console.WriteLine($"  forecast: {(r.Forecast is { } f ? $"{f.ModelId} p_yes={Dec.Show(f.ProbabilityYes)}±{Dec.Show(f.Uncertainty)}{(f.Synthetic ? " SYNTHETIC" : "")}" : "none (no validated model: observe/abstain)")}; fees: {r.FeeScheduleId ?? "unknown"}");
         Console.WriteLine($"  strategy: {r.Rationale}");
-        if (r.AlreadyProcessed) Console.WriteLine("  already processed for this snapshot and estimate; nothing new submitted (idempotent rerun)");
+        if (r.AlreadyProcessed) Console.WriteLine("  already processed for this snapshot and evidence; nothing new submitted (idempotent rerun)");
         foreach (var o in r.Orders)
         {
-            Console.WriteLine($"  order {o.ClientOrderId}: {o.Intent.Action} {o.Intent.Quantity} {o.Intent.Side} @ {Dec.Show(o.Intent.LimitPrice)} -> {o.Status.ToUpperInvariant()} (PAPER)");
-            if (!o.Verdict.Approved) foreach (var reason in o.Verdict.Reasons) Console.WriteLine($"    risk: {reason}");
+            Console.WriteLine($"  order {o.ClientOrderId}: {o.Intent.Action} {o.Intent.Quantity} {o.Intent.Side} @ {Dec.Show(o.Intent.LimitPrice)} IOC -> " +
+                              (o.Verdict.Approved ? $"PENDING (PAPER), reserved {Dec.Show(o.Reserved)}, simulated arrival {Ts.ToText(o.ArrivalAt)}" : "REJECTED"));
+            foreach (var reason in o.Verdict.Reasons) Console.WriteLine($"    risk: {reason}");
+        }
+        if (r.Orders.Any(o => o.Verdict.Approved))
+            Console.WriteLine("  next: record again, then 'kb paper resolve' — fills use only observations at or after arrival");
+    }
+
+    private static void PrintResolved(IReadOnlyList<ResolvedOrder> resolved)
+    {
+        foreach (var o in resolved)
+        {
+            Console.WriteLine($"resolved order #{o.OrderId} {o.Ticker}: {o.Status.ToUpperInvariant()} ({o.Filled} filled) — {o.Reason}");
             foreach (var f in o.Fills) Console.WriteLine($"    SIMULATED fill {f.Quantity} @ {Dec.Show(f.Price)} fee {Dec.Show(f.Fee)}");
         }
     }

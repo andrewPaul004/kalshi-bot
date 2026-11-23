@@ -8,17 +8,23 @@ using KalshiBot.Core.Trading;
 
 namespace KalshiBot.Core.Status;
 
-public sealed record RunRow(long Id, string StartedAt, string? FinishedAt, string Status, string DataOrigin, string? Detail);
+public sealed record RunRow(long Id, string StartedAt, string Status, string DataOrigin, string? Detail);
 public sealed record MarketRow(MarketSnapshot Snapshot, int RulesVersions, TimeSpan Age);
-public sealed record AccountRow(AccountState State, decimal MarkValue, decimal Equity, IReadOnlyList<string> Problems);
-public sealed record OrderRow(string CreatedAt, string Ticker, string Side, string Action, long Quantity, string Limit,
-    string Status, long Filled, string DataOrigin, string? Reasons);
-public sealed record ResearchRunRow(long Id, string PacketId, string FinishedAt, string Outcome, string? AuthMethod, string? Detail);
+public sealed record AccountRow(AccountState State, Valuation Valuation, decimal? OpeningEquityToday, IReadOnlyList<string> Problems);
+public sealed record OrderRow(string CreatedAt, string Ticker, string Side, string Action, long Quantity, string Limit, string Status,
+    long Filled, string ArrivalAt, string DataOrigin, string? Reasons);
+public sealed record DecisionRow(string CreatedAt, string Ticker, string Outcome, string? ModelId, string Rationale);
+public sealed record ResearchRunRow(long Id, string FinishedAt, string Outcome, string? AuthMethod, string? CliVersion, string? Detail);
 
-public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, long SchemaVersion, bool Halted, string? HaltReason,
-    IReadOnlyList<string> Watchlist, IReadOnlyList<RunRow> Runs, IReadOnlyList<MarketRow> Markets,
-    IReadOnlyList<StoredResult> Research, IReadOnlyList<ResearchRunRow> ResearchRuns,
-    IReadOnlyList<AccountRow> Accounts, IReadOnlyList<OrderRow> Orders)
+/// <param name="BillingVerified">What the software checked itself (last research auth check).</param>
+/// <param name="BillingAttested">What the owner stated and when (usage credits disabled).</param>
+/// <param name="BillingUnknown">What nobody has verified (spec 4.2: never claim a guaranteed zero-dollar bill).</param>
+public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, long SchemaVersion, string? DbOrigin, bool Halted,
+    string? HaltReason, IReadOnlyList<string> Watchlist, IReadOnlyList<RunRow> Runs, IReadOnlyList<MarketRow> Markets,
+    string BillingVerified, string BillingAttested, IReadOnlyList<string> BillingUnknown,
+    IReadOnlyList<StoredRecord> Research, IReadOnlyList<ResearchRunRow> ResearchRuns,
+    IReadOnlyList<AccountRow> Accounts, IReadOnlyList<OrderRow> Orders, IReadOnlyList<DecisionRow> Decisions,
+    int Abstentions, int DecisionsWithCandidates)
 {
     public static StatusReport Build(Db db, TimeProvider time)
     {
@@ -26,47 +32,61 @@ public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, lon
         var controls = new Controls(db, time);
         var store = new MarketStore(db);
         var ledger = new PaperLedger(db, time);
-        var latest = store.LatestPerTicker();
+        var engine = new PaperEngine(db, time, new RiskEngine(RiskLimits.PaperFixture));
+        var research = new ResearchStore(db);
+        var day = ReportingDay.Text(ReportingDay.For(now));
 
-        var markets = latest.Select(s => new MarketRow(s,
+        var markets = store.LatestPerTicker().Select(s => new MarketRow(s,
             (int)db.Scalar<long>("SELECT COUNT(*) FROM market_rules WHERE ticker = $t", ("$t", s.Ticker)), now - s.ObservedAt)).ToList();
 
         var accounts = ledger.Accounts().Select(a =>
         {
             var st = ledger.State(a.Id, controls.Halted);
-            var mark = st.Positions.Sum(p => p.Quantity * MarkPrice(latest.FirstOrDefault(s => s.Ticker == p.Ticker), p.Side));
-            return new AccountRow(st, mark, st.Cash + mark, ledger.Verify(a.Id));
+            var opening = db.Scalar<string>("SELECT opening_equity FROM paper_daily_equity WHERE account_id = $a AND reporting_day = $d",
+                ("$a", a.Id), ("$d", day));
+            return new AccountRow(st, engine.Value(st, now), opening is null ? null : Dec.Parse(opening), ledger.Verify(a.Id));
         }).ToList();
 
-        return new StatusReport(now, db.Path, db.Scalar<long>("SELECT MAX(version) FROM schema_migrations"), controls.Halted, controls.HaltReason,
-            new Watchlist(db, time).List(),
-            db.Query("SELECT * FROM capture_runs ORDER BY id DESC LIMIT 8", r => new RunRow(r.L("id"), r.S("started_at"),
-                r.Str("finished_at"), r.S("status"), r.S("data_origin"), r.Str("detail"))),
-            markets,
-            new ResearchStore(db).Results(10),
-            db.Query("SELECT id, packet_id, finished_at, outcome, auth_method, detail FROM research_runs ORDER BY id DESC LIMIT 8",
-                r => new ResearchRunRow(r.L("id"), r.S("packet_id"), r.S("finished_at"), r.S("outcome"), r.Str("auth_method"), r.Str("detail"))),
-            accounts,
-            db.Query("SELECT * FROM paper_orders ORDER BY id DESC LIMIT 15", r => new OrderRow(r.S("created_at"), r.S("ticker"),
-                r.S("side"), r.S("action"), r.L("quantity"), r.S("limit_price"), r.S("status"), r.L("filled_quantity"),
-                r.S("data_origin"), r.Str("reasons"))));
-    }
+        var lastAuth = db.QuerySingle("SELECT finished_at, outcome, auth_method, subscription_type, cli_version FROM research_runs WHERE auth_method IS NOT NULL ORDER BY id DESC LIMIT 1",
+            r => $"last auth check {r.S("finished_at")}: {r.S("auth_method")}{(r.Str("subscription_type") is { } t ? " (" + t + ")" : "")}, CLI {r.Str("cli_version") ?? "?"}, run {r.S("outcome")}");
+        var attestation = research.LatestAttestation();
 
-    /// <summary>Conservative mark: what the position would fetch selling into the best recorded bid (0 if none).</summary>
-    public static decimal MarkPrice(MarketSnapshot? s, string side)
-    {
-        if (s is null) return 0m;
-        if (s.Status == "finalized" && s.Result is "yes" or "no") return s.Result == side ? 1m : 0m;
-        var bids = s.Book?.BidsFor(side);
-        return bids is { Count: > 0 } ? bids[0].Price : (side == Side.Yes ? s.YesBid : s.NoBid) ?? 0m;
+        return new StatusReport(now, db.Path, db.Scalar<long>("SELECT MAX(version) FROM schema_migrations"), DatabaseOrigin.Get(db),
+            controls.Halted, controls.HaltReason, new Watchlist(db, time).List(),
+            db.Query("SELECT * FROM capture_runs ORDER BY id DESC LIMIT 8",
+                r => new RunRow(r.L("id"), r.S("started_at"), r.S("status"), r.S("data_origin"), r.Str("detail"))),
+            markets,
+            lastAuth ?? "no research auth check has run yet",
+            attestation is null ? "none: usage credits/extra usage not attested (research runs refuse)" : $"owner attested on {Ts.ToText(attestation.AttestedAt)}: {attestation.Statement}",
+            ["usage-credit setting is not machine-verifiable; relies on the owner attestation",
+             "MDM and server-managed Claude settings are not inspected (check /status → Setting sources)",
+             "no guarantee of a zero-dollar bill is implied"],
+            research.Records(10),
+            db.Query("SELECT id, finished_at, outcome, auth_method, cli_version, detail FROM research_runs ORDER BY id DESC LIMIT 8",
+                r => new ResearchRunRow(r.L("id"), r.S("finished_at"), r.S("outcome"), r.Str("auth_method"), r.Str("cli_version"), r.Str("detail"))),
+            accounts,
+            db.Query("SELECT * FROM paper_orders ORDER BY id DESC LIMIT 15", r => new OrderRow(r.S("created_at"), r.S("ticker"), r.S("side"),
+                r.S("action"), r.L("quantity"), r.S("limit_price"), r.S("status"), r.L("filled_quantity"), r.S("arrival_at"),
+                r.S("data_origin"), r.Str("reasons"))),
+            db.Query("""
+                SELECT d.created_at, s.ticker, d.outcome, d.model_id, d.rationale FROM paper_decisions d
+                JOIN market_snapshots s ON s.id = d.snapshot_id ORDER BY d.id DESC LIMIT 10
+                """, r => new DecisionRow(r.S("created_at"), r.S("ticker"), r.S("outcome"), r.Str("model_id"), r.S("rationale"))),
+            (int)db.Scalar<long>("SELECT COUNT(*) FROM paper_decisions WHERE outcome = 'abstain'"),
+            (int)db.Scalar<long>("SELECT COUNT(*) FROM paper_decisions WHERE outcome = 'candidates'"));
     }
 
     public string ToText()
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"kalshi-bot status @ {Ts.ToText(GeneratedAt)}   mode: OBSERVE + PAPER only (no live execution)");
-        sb.AppendLine($"db: {DbPath} (schema v{SchemaVersion})   kill switch: {(Halted ? "ENGAGED - " + HaltReason : "off")}");
+        sb.AppendLine($"kalshi-bot status @ {Ts.ToText(GeneratedAt)}   mode: OBSERVE + PAPER only (no live execution exists)");
+        sb.AppendLine($"db: {DbPath} (schema v{SchemaVersion}, data origin {Origin(DbOrigin)})   safety halt: {(Halted ? "ENGAGED - " + HaltReason : "off")}");
         sb.AppendLine($"watchlist: {(Watchlist.Count == 0 ? "(empty)" : string.Join(", ", Watchlist))}");
+        sb.AppendLine();
+        sb.AppendLine("claude billing boundary:");
+        sb.AppendLine($"  verified: {BillingVerified}");
+        sb.AppendLine($"  attested: {BillingAttested}");
+        foreach (var u in BillingUnknown) sb.AppendLine($"  unknown:  {u}");
         sb.AppendLine();
         sb.AppendLine("capture runs:");
         foreach (var r in Runs) sb.AppendLine($"  #{r.Id} {r.StartedAt} {r.Status,-9} {Origin(r.DataOrigin)}{(r.Detail is null ? "" : "  " + Trim(r.Detail, 100))}");
@@ -79,32 +99,36 @@ public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, lon
                           $"age {Age(m.Age)} rules v{m.RulesVersions} close {(s.CloseTime is { } c ? Ts.ToText(c) : "-")}");
         }
         sb.AppendLine();
-        sb.AppendLine("research results (EXPERIMENTAL, unvalidated):");
-        foreach (var r in Research)
-            sb.AppendLine($"  #{r.Id} {r.Ticker} p_yes={(r.ProbabilityYes is { } p ? Dec.ToText(p) : "abstained")} conf={r.Confidence} via {r.SourceKind} [{Origin(r.DataOrigin)}] packet {r.PacketId[..12]}");
-        foreach (var r in ResearchRuns)
-            sb.AppendLine($"  run #{r.Id} {r.FinishedAt} {r.Outcome} auth={r.AuthMethod ?? "-"} {Trim(r.Detail ?? "", 120)}");
-        sb.AppendLine();
-        sb.AppendLine("paper accounts (SIMULATED fills):");
+        sb.AppendLine("paper accounts (SIMULATED fills; fixture results are meaningless as performance):");
         foreach (var a in Accounts)
         {
             var st = a.State;
-            sb.AppendLine($"  {st.Name}: cash {Dec.Show(st.Cash)} mark {Dec.Show(a.MarkValue)} equity {Dec.Show(a.Equity)} " +
-                          $"(start {Dec.Show(st.StartingCash)}, realized {Dec.Show(st.RealizedPnl)}) ledger {(a.Problems.Count == 0 ? "OK" : "PROBLEMS: " + string.Join("; ", a.Problems))}");
+            sb.AppendLine($"  {st.Name} [{Origin(st.DataOrigin)}]: cash {Dec.Show(st.Cash)} reserved {Dec.Show(st.HeldReservations)} " +
+                          $"capital at risk {Dec.Show(st.CapitalAtRisk)} equity {Dec.Show(a.Valuation.Equity)}{(a.Valuation.Certain ? "" : " (UNCERTAIN: " + string.Join("; ", a.Valuation.Problems) + ")")} " +
+                          $"realized {Dec.Show(st.RealizedPnl)} | today opened {(a.OpeningEquityToday is { } o ? Dec.Show(o) : "-")} | ledger {(a.Problems.Count == 0 ? "OK" : "PROBLEMS: " + string.Join("; ", a.Problems))}");
             foreach (var p in st.Positions) sb.AppendLine($"    {p.Ticker} {p.Side} x{p.Quantity} cost {Dec.Show(p.CostBasis)}");
         }
         sb.AppendLine();
+        sb.AppendLine($"decisions: {DecisionsWithCandidates} with candidates, {Abstentions} abstentions (recent):");
+        foreach (var d in Decisions) sb.AppendLine($"  {d.CreatedAt} {d.Ticker} {d.Outcome} [{d.ModelId ?? "no model"}] {Trim(d.Rationale, 140)}");
+        sb.AppendLine();
         sb.AppendLine("recent paper orders:");
         foreach (var o in Orders)
-            sb.AppendLine($"  {o.CreatedAt} {o.Action} {o.Quantity} {o.Ticker} {o.Side} @ {o.Limit} -> {o.Status} ({o.Filled} filled) [{Origin(o.DataOrigin)}] {Trim(o.Reasons ?? "", 140)}");
+            sb.AppendLine($"  {o.CreatedAt} {o.Action} {o.Quantity} {o.Ticker} {o.Side} @ {Dec.Show(Dec.Parse(o.Limit))} IOC -> {o.Status} ({o.Filled} filled, arrival {o.ArrivalAt}) [{Origin(o.DataOrigin)}] {Trim(o.Reasons ?? "", 120)}");
+        sb.AppendLine();
+        sb.AppendLine("research records (EXPERIMENTAL; probabilities are for scoring only and never drive trades):");
+        foreach (var r in Research)
+            sb.AppendLine($"  #{r.Id} {r.ResearchId} {r.MarketTicker} {r.Disposition} p_yes={(r.ExperimentalProbability is { } p ? Dec.Show(p) : "-")} via {r.SourceKind} [{Origin(r.DataOrigin)}] valid until {Ts.ToText(r.ValidUntilUtc)}");
+        foreach (var r in ResearchRuns)
+            sb.AppendLine($"  run #{r.Id} {r.FinishedAt} {r.Outcome} auth={r.AuthMethod ?? "-"} cli={r.CliVersion ?? "-"} {Trim(r.Detail ?? "", 120)}");
         return sb.ToString();
     }
 
     public string ToHtml()
     {
         static string H(string? s) => WebUtility.HtmlEncode(s ?? "");
-        string Badge(string origin) => DataOrigin.IsSynthetic(origin)
-            ? "<span class=\"b syn\">SYNTHETIC</span>" : $"<span class=\"b live\">{H(origin)}</span>";
+        string Badge(string? origin) => origin is not null && DataOrigin.IsSynthetic(origin)
+            ? "<span class=\"b syn\">SYNTHETIC</span>" : $"<span class=\"b live\">{H(origin ?? "none")}</span>";
 
         var sb = new StringBuilder();
         sb.Append("""
@@ -118,12 +142,17 @@ public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, lon
             th,td{border-bottom:1px solid var(--line);padding:5px 8px;text-align:left;vertical-align:top}th{color:var(--mute);font-weight:600}
             .b{border-radius:4px;padding:1px 6px;font-size:12px;font-weight:600;white-space:nowrap}
             .syn{color:var(--syn);background:var(--synbg)}.live{color:var(--live);background:var(--livebg)}.warn{color:var(--warn);background:var(--warnbg)}
-            code{font-size:12px}
+            code{font-size:12px}ul{margin:4px 0;padding-left:20px}
             </style></head><body>
             """);
-        sb.Append($"<h1>Kalshi Bot</h1><p class=\"m\">Generated {H(Ts.ToText(GeneratedAt))} · mode <b>OBSERVE + PAPER</b> (no live execution) · schema v{SchemaVersion}</p>");
-        if (Halted) sb.Append($"<p><span class=\"b warn\">KILL SWITCH ENGAGED</span> {H(HaltReason)}</p>");
+        sb.Append($"<h1>Kalshi Bot</h1><p class=\"m\">Generated {H(Ts.ToText(GeneratedAt))} · mode <b>OBSERVE + PAPER</b> (no live execution exists) · schema v{SchemaVersion} · data {Badge(DbOrigin)}</p>");
+        if (Halted) sb.Append($"<p><span class=\"b warn\">SAFETY HALT ENGAGED</span> {H(HaltReason)}</p>");
         sb.Append($"<p class=\"m\">Watchlist: {H(Watchlist.Count == 0 ? "(empty)" : string.Join(", ", Watchlist))}</p>");
+
+        sb.Append("<h2>Claude billing boundary</h2><ul>");
+        sb.Append($"<li><b>Verified:</b> {H(BillingVerified)}</li><li><b>Attested:</b> {H(BillingAttested)}</li>");
+        foreach (var u in BillingUnknown) sb.Append($"<li><b>Unknown:</b> {H(u)}</li>");
+        sb.Append("</ul>");
 
         sb.Append("<h2>Markets (latest snapshot)</h2><div class=\"wrap\"><table><tr><th>Ticker</th><th>Origin</th><th>Status</th><th>Yes bid/ask</th><th>No bid/ask</th><th>Age</th><th>Rules</th><th>Close</th></tr>");
         foreach (var m in Markets)
@@ -133,29 +162,35 @@ public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, lon
         }
         sb.Append("</table></div>");
 
-        sb.Append("<h2>Paper accounts <span class=\"b warn\">SIMULATED</span></h2><div class=\"wrap\"><table><tr><th>Account</th><th>Cash</th><th>Mark value</th><th>Equity</th><th>Realized</th><th>Positions</th><th>Ledger</th></tr>");
+        sb.Append("<h2>Paper accounts <span class=\"b warn\">SIMULATED</span></h2><div class=\"wrap\"><table><tr><th>Account</th><th>Cash</th><th>Reserved</th><th>Capital at risk</th><th>Equity</th><th>Realized</th><th>Opened today</th><th>Positions</th><th>Ledger</th></tr>");
         foreach (var a in Accounts)
         {
             var st = a.State;
             var pos = string.Join("<br>", st.Positions.Select(p => $"{H(p.Ticker)} {H(p.Side)} ×{p.Quantity} (cost {Dec.Show(p.CostBasis)})"));
-            sb.Append($"<tr><td>{H(st.Name)}</td><td>{Dec.Show(st.Cash)}</td><td>{Dec.Show(a.MarkValue)}</td><td>{Dec.Show(a.Equity)}</td><td>{Dec.Show(st.RealizedPnl)}</td><td>{(pos.Length == 0 ? "-" : pos)}</td><td>{(a.Problems.Count == 0 ? "OK" : "<span class=\"b warn\">" + H(string.Join("; ", a.Problems)) + "</span>")}</td></tr>");
+            var eq = Dec.Show(a.Valuation.Equity) + (a.Valuation.Certain ? "" : $" <span class=\"b warn\">UNCERTAIN</span> {H(string.Join("; ", a.Valuation.Problems))}");
+            sb.Append($"<tr><td>{H(st.Name)} {Badge(st.DataOrigin)}</td><td>{Dec.Show(st.Cash)}</td><td>{Dec.Show(st.HeldReservations)}</td><td>{Dec.Show(st.CapitalAtRisk)}</td><td>{eq}</td><td>{Dec.Show(st.RealizedPnl)}</td><td>{(a.OpeningEquityToday is { } o ? Dec.Show(o) : "-")}</td><td>{(pos.Length == 0 ? "-" : pos)}</td><td>{(a.Problems.Count == 0 ? "OK" : "<span class=\"b warn\">" + H(string.Join("; ", a.Problems)) + "</span>")}</td></tr>");
         }
         sb.Append("</table></div>");
 
-        sb.Append("<h2>Recent paper orders</h2><div class=\"wrap\"><table><tr><th>Time</th><th>Order</th><th>Origin</th><th>Result</th><th>Why</th></tr>");
-        foreach (var o in Orders)
-            sb.Append($"<tr><td>{H(o.CreatedAt)}</td><td>{H(o.Action)} {o.Quantity} <code>{H(o.Ticker)}</code> {H(o.Side)} @ {H(o.Limit)}</td><td>{Badge(o.DataOrigin)}</td><td>{H(o.Status)} ({o.Filled} filled)</td><td>{H(o.Reasons)}</td></tr>");
+        sb.Append($"<h2>Decisions</h2><p class=\"m\">{DecisionsWithCandidates} with candidates · {Abstentions} abstentions</p><div class=\"wrap\"><table><tr><th>Time</th><th>Market</th><th>Outcome</th><th>Model</th><th>Rationale</th></tr>");
+        foreach (var d in Decisions)
+            sb.Append($"<tr><td>{H(d.CreatedAt)}</td><td><code>{H(d.Ticker)}</code></td><td>{H(d.Outcome)}</td><td>{H(d.ModelId ?? "none")}</td><td>{H(d.Rationale)}</td></tr>");
         sb.Append("</table></div>");
 
-        sb.Append("<h2>Research <span class=\"b warn\">EXPERIMENTAL · UNVALIDATED</span></h2><div class=\"wrap\"><table><tr><th>#</th><th>Ticker</th><th>P(yes)</th><th>Confidence</th><th>Source</th><th>Origin</th><th>Packet</th></tr>");
+        sb.Append("<h2>Paper orders</h2><div class=\"wrap\"><table><tr><th>Time</th><th>Order</th><th>Origin</th><th>Result</th><th>Why</th></tr>");
+        foreach (var o in Orders)
+            sb.Append($"<tr><td>{H(o.CreatedAt)}</td><td>{H(o.Action)} {o.Quantity} <code>{H(o.Ticker)}</code> {H(o.Side)} @ {H(Dec.Show(Dec.Parse(o.Limit)))} IOC</td><td>{Badge(o.DataOrigin)}</td><td>{H(o.Status)} ({o.Filled} filled)<br><span class=\"m\">arrival {H(o.ArrivalAt)}</span></td><td>{H(o.Reasons)}</td></tr>");
+        sb.Append("</table></div>");
+
+        sb.Append("<h2>Research <span class=\"b warn\">EXPERIMENTAL · SCORING ONLY</span></h2><div class=\"wrap\"><table><tr><th>#</th><th>Research id</th><th>Market</th><th>Disposition</th><th>Experimental P(yes)</th><th>Source</th><th>Origin</th><th>Valid until</th></tr>");
         foreach (var r in Research)
-            sb.Append($"<tr><td>{r.Id}</td><td><code>{H(r.Ticker)}</code></td><td>{(r.ProbabilityYes is { } p ? Dec.ToText(p) : "abstained")}</td><td>{H(r.Confidence)}</td><td>{H(r.SourceKind)}</td><td>{Badge(r.DataOrigin)}</td><td><code>{H(r.PacketId[..12])}</code></td></tr>");
+            sb.Append($"<tr><td>{r.Id}</td><td><code>{H(r.ResearchId)}</code></td><td><code>{H(r.MarketTicker)}</code></td><td>{H(r.Disposition)}</td><td>{(r.ExperimentalProbability is { } p ? Dec.Show(p) : "-")}</td><td>{H(r.SourceKind)}</td><td>{Badge(r.DataOrigin)}</td><td>{H(Ts.ToText(r.ValidUntilUtc))}</td></tr>");
         sb.Append("</table></div>");
         if (ResearchRuns.Count > 0)
         {
-            sb.Append("<div class=\"wrap\"><table><tr><th>Claude run</th><th>Finished</th><th>Outcome</th><th>Auth</th><th>Detail</th></tr>");
+            sb.Append("<div class=\"wrap\"><table><tr><th>Claude run</th><th>Finished</th><th>Outcome</th><th>Auth</th><th>CLI</th><th>Detail</th></tr>");
             foreach (var r in ResearchRuns)
-                sb.Append($"<tr><td>#{r.Id}</td><td>{H(r.FinishedAt)}</td><td>{H(r.Outcome)}</td><td>{H(r.AuthMethod ?? "-")}</td><td>{H(r.Detail)}</td></tr>");
+                sb.Append($"<tr><td>#{r.Id}</td><td>{H(r.FinishedAt)}</td><td>{H(r.Outcome)}</td><td>{H(r.AuthMethod ?? "-")}</td><td>{H(r.CliVersion ?? "-")}</td><td>{H(r.Detail)}</td></tr>");
             sb.Append("</table></div>");
         }
 
@@ -166,7 +201,7 @@ public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, lon
         return sb.ToString();
     }
 
-    private static string Origin(string o) => DataOrigin.IsSynthetic(o) ? "SYNTHETIC" : o;
+    private static string Origin(string? o) => o is null ? "none yet" : DataOrigin.IsSynthetic(o) ? "SYNTHETIC" : o;
     private static string P(decimal? d) => d is null ? "-" : Dec.Show(d.Value);
     private static string Trim(string s, int n) => s.Length <= n ? s : s[..n] + "…";
     private static string Age(TimeSpan t) => t.TotalMinutes < 1 ? $"{(int)t.TotalSeconds}s" : t.TotalHours < 1 ? $"{(int)t.TotalMinutes}m" : t.TotalDays < 1 ? $"{t.TotalHours:0.#}h" : $"{t.TotalDays:0.#}d";

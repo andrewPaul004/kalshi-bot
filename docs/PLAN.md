@@ -1,53 +1,74 @@
 # Plan
 
-## Source of requirements
+Requirements come from `kalshi-claude-subscription-spec.md`, v2.0 of 2026-11-22. This file records decisions and how
+the build maps to the spec.
 
-The specification was provided as a ChatGPT share link. It could not be read: `chatgpt.com` is outside this cloud
-environment's network policy, and the link is account-scoped. Phases 1–2 below are derived from the deliverables in
-the kickoff request. **Reconcile against the spec** (drop it in `docs/SPEC.md`) before starting Phase 3.
+## Build vs. reuse (spec §10)
 
-## Build vs. reuse (decided 2026-11-23)
-
-| Concern | Decision | Evidence |
+| Concern | Decision | Evidence / reason |
 |---|---|---|
-| Kalshi client | **Build** a thin GET-only `HttpClient` for 5 public endpoints. Store raw bodies verbatim. | Kalshi publishes official SDKs only for Python (`kalshi-python-sync`) and TypeScript (`kalshi-typescript`), both v3.36.0 and OpenAPI-generated. There is no official .NET SDK. Market data endpoints need no auth (`_auth_settings = []` in the SDK). Field names were checked against the SDK models. |
-| Kalshi signing (later) | **Build** when needed. About 20 lines of `System.Security.Cryptography` code. | SDK `auth.py`/`auth.ts`: RSA-PSS SHA-256 (salt = digest) or Ed25519 over `timestamp_ms + METHOD + path` (no query string). |
-| Claude access | **Reuse** the official `claude` CLI (`claude -p --output-format json --json-schema`). | Only subscription-backed programmatic path. Agent SDK docs bar third-party products from offering claude.ai login; this is personal use of your own login through the official CLI. |
-| Storage | **Reuse** `Microsoft.Data.Sqlite` 10.0.15 with hand-written SQL. No ORM. | Small schema; explicit SQL is easier to review; append-only triggers and CHECKs live in the schema. |
-| CLI parsing / web | Hand-rolled argument parser; ASP.NET Core minimal API from the shared framework for the status page. | Avoids dependencies for about 20 commands. |
-| Tests | xUnit v3 (4.0.3) on Microsoft.Testing.Platform. | The .NET 10 SDK no longer runs VSTest with xUnit v3 4.x. |
-| Community Kalshi bots | Not adopted. | The spec's repository review was unavailable, and community repos were not re-reviewed here. None is .NET, and none would save meaningful work at this scope. |
+| Overall | **Build** a small C# core (the spec's default recommendation). | .NET 10 LTS is the operator's stack. None of the screened projects is .NET. |
+| Kalshi market data | **Build** a thin GET-only client and store raw bodies verbatim. | Kalshi's official SDKs (`kalshi-python-sync` and `kalshi-typescript` 3.36.0) are Python/TypeScript and OpenAPI-generated. Field names and hosts were checked against them. Market endpoints need no auth. |
+| Kalshi execution (Phase 4) | **Build** against the then-current contract. | SDK 3.36.0 confirms `/portfolio/events/orders` and the signing scheme (see INTEGRATION_NOTES). A pinned contract snapshot comes before demo work. |
+| Claude access | **Reuse** the official `claude` CLI only. | The only subscription-backed programmatic path (spec §2.1, S1–S3). |
+| Storage | **Reuse** `Microsoft.Data.Sqlite` 10.0.15 with explicit SQL. | Append-only triggers, CHECKs, and `BEGIN IMMEDIATE` reservations live in the schema. |
+| Research schema validation | **Build** a small JSON-Schema-subset validator. | Validates against the exact `schemas/` file and fails closed on unknown keywords. Avoids a dependency whose licensing was not verified. |
+| `ryanfrigo/kalshi-ai-trading-bot` | Ideas only; no code. | Default path is OpenRouter (BILL-02 conflict). Its owner-published track record shows no measured edge (S17). |
+| `clayve-one/kalshi` | Architectural reference only. | The backtest/paper/demo/live interface idea matches our mode boundary. Python, license unreviewed. |
+| `apeabody007/Quant-toolkit` | Possible research reference for Phase 3 scoring. | Not a bot or a model. |
+| `Skylcodes/krypt-trader`, `cryptuon/polybot` | Not used. | Out of scope; trade-capable tooling is not attached to research. |
 
-Runtime: .NET 10 LTS (SDK 10.0.115, runtime 10.0.15, from Ubuntu's archive). .NET 11 is out but is STS, so 10 is
-the supported LTS choice.
+The repository screening is the spec's (§10). It was not re-fetched here, because this session's GitHub access is
+scoped to this repository. No third-party code was copied, so the §10 per-copy documentation duty has not arisen.
 
-## Phases
+## Phases (spec §11) and status
 
-**Phase 1 — Observe (done).** Record the selected markets: market, order book, event, and series data, plus rules text,
-into SQLite. Raw bodies are stored with SHA-256, URL, request and response timestamps, and the server `Date` header.
-A rules change creates a new rules version. Capture runs are labeled by data origin, and crashed runs are marked
-abandoned.
+| Phase | Status |
+|---|---|
+| 0 Project and integration facts | Done: docs, verified facts, reuse decision. |
+| 1 Recorder and offline paper slice | Done. Replay: `kb replay`. Live capture is blocked here by network policy. |
+| 2 Claude research workflow | Done except the real subscription round trip, which is blocked here (STATE.md). |
+| 3 One candidate strategy and prospective evaluation | Next. Needs real data, a category choice, and a frozen evaluation protocol. |
+| 4 Demo execution and recovery | Not started. Separately authorized: demo credentials, the exchange lifecycle, AC-07/08/18/19. |
+| 5 Live pilot | Not authorized. |
+| 6 Optional improvements | Not started. |
 
-**Phase 2 — Paper + research round trip (done, except the real Claude round trip, which is blocked here).**
-- Deterministic `IStrategy` (one reference strategy) and a fail-closed `RiskEngine`.
-- IOC paper broker against recorded books, plus an append-only ledger with settlement.
-- Research packet export (deterministic, quote-free) and strict result import.
-- `research run`, which calls the Claude CLI only after `BillingGuard` verifies subscription auth.
+## Acceptance-test traceability (spec §9)
 
-**Phase 3 — Real data + calibration (next; reconcile with the spec first).**
-1. Run the recorder against production for a small watchlist on a schedule (the user's machine or an allowed environment).
-2. Run real research round trips. Accumulate estimates and settled outcomes.
-3. Score the estimates (Brier score, log loss, calibration buckets) against outcomes and against the market price at
-   packet time. Paper P&L by strategy.
-4. Promote an estimate source from `unvalidated` only through a recorded calibration result and a new migration.
-   Until then, research probabilities stay out of any non-paper decision.
+| AC | Status | Where |
+|---|---|---|
+| 01 No Claude or LLM credentials needed | ✅ | The replay and every test run with no `claude` and no keys |
+| 02 Metered credential or unsupported auth refused | ✅ | `BillingGuardTests`, `ReviewRegressionTests`, `ClaudeRunnerTests` |
+| 03 Quota, expiry, or changed CLI output suspends without fallback | ✅ | `Quota_exhaustion_or_errors_suspend_without_retry_or_fallback`; unknown version or auth output is refused |
+| 04 Unsafe research fields rejected | ✅ | `ResearchImportTests` |
+| 05 Research probability not authoritative | ✅ | `ResearchBoundaryTests` (source scan plus a behavioral test) |
+| 06 Shared cap under concurrency | ✅ | `Concurrent_signals_cannot_both_spend_the_same_capacity` |
+| 07 Partial fill and cancel race | ◐ | Paper partial fills reconcile with reservations. The cancel race needs the exchange (Phase 4). |
+| 08 Lost submission response | ⏳ | Phase 4 |
+| 09 Restart mid-reservation or mid-fill | ✅ (paper) | `RecoveryTests` crash points; exchange reconciliation is Phase 4 |
+| 10 Invalid inputs give specific rejections | ✅ | `Invalid_required_inputs_are_rejected_with_specific_reasons` |
+| 11 Halt persists across restart and day change | ✅ | `Daily_loss_trigger_persists_a_halt_that_survives_restart_and_midnight` |
+| 12 YES/NO grid and complement economics | ✅ | `Side_complement_grid_and_maximum_loss_are_economically_correct` |
+| 13 Settlement, fees, duplicates | ✅ | `LedgerTests`. Paper has a single deposit; withdrawals are not modeled. |
+| 14 Deterministic replay | ✅ | `Frozen_fixture_replay_is_exactly_reproducible` |
+| 15 No write path in paper | ✅ | `NoExchangeWritePathTests` (no write code exists) |
+| 16 OS-enforced research/executor separation | ⏳ | Phase 5 deployment |
+| 17 Fresh inputs required | ✅ | Forecast-age and snapshot-age checks; the strategy does not depend on Claude |
+| 18 External account activity | ⏳ | Phase 4 |
+| 19 One executor per account | ◐ | `ProcessLock` per paper account and for research. A fixed-location exchange-account lock is Phase 4. |
+| 20 No re-entry of the same signal | ✅ | `The_same_signal_is_not_entered_again_across_scans_and_restarts` |
+| 21 Halt between reservation and dispatch | ✅ (paper) | `A_halt_set_after_one_decision_blocks_the_next_dispatch_but_not_resolution` |
+| 22 Vanished quote before arrival | ✅ | `A_quote_that_disappears_before_arrival_does_not_fill` |
 
-**Phase 4 — Demo-environment execution (separately authorized).** Signed requests against `external-api.demo.kalshi.co`,
-order state reconciliation, and a real kill switch. Credentials come from a local secret store, never the repo.
+## Decisions log
 
-**Phase 5 — Production execution (separately authorized).** Requires user-chosen bankroll and limits, a live `RiskLimits`
-preset reviewed by the user, and explicit go-ahead. Out of scope until then.
-
-## Non-goals now
-
-Multiple strategies, a large dashboard, a Python service, multi-agent orchestration, websockets, and any live order path.
+- **2026-11-23 Research probabilities.** Claude's probabilities are not strategy input, even in paper (spec §4.5, AC-05).
+  Real data has no validated model, so paper on real data abstains. A labeled synthetic fixture model drives fixture runs.
+- **2026-11-23 Paper fills.** Fills come only from the first observation at or after simulated arrival: 2 s latency,
+  2 min maximum evidence gap, IOC, and liquidity already used is subtracted (spec §8.4).
+- **2026-11-23 Fees.** Unknown fees block risk. Only a labeled synthetic fixture schedule exists until the operator
+  verifies Kalshi's schedule (DATA-01).
+- **2026-11-23 Migration 3.** It renames the pre-spec paper and research tables to `legacy_*_v1`, keeping their data,
+  rather than editing shipped migrations.
+- **2026-11-23 Research bounds.** Claude Code 2.1.330 has no max-turns flag, so research runs are bounded by a 5-minute
+  timeout and web-only tools. Revisit after CLI upgrades.

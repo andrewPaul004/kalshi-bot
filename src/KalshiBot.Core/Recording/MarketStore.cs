@@ -32,6 +32,18 @@ public sealed class MarketStore(Db db)
     public MarketSnapshot? Latest(string ticker) =>
         db.QuerySingle("SELECT * FROM market_snapshots WHERE ticker = $t ORDER BY observed_at DESC, id DESC LIMIT 1", Map, ("$t", ticker));
 
+    /// <summary>The snapshot of the same market recorded immediately before <paramref name="s"/>.</summary>
+    public MarketSnapshot? Previous(MarketSnapshot s) =>
+        db.QuerySingle("""
+            SELECT * FROM market_snapshots WHERE ticker = $t AND (observed_at < $o OR (observed_at = $o AND id < $id))
+            ORDER BY observed_at DESC, id DESC LIMIT 1
+            """, Map, ("$t", s.Ticker), ("$o", Ts.ToText(s.ObservedAt)), ("$id", s.Id));
+
+    /// <summary>First observation of a market at or after a time (simulated order arrival, spec 8.4).</summary>
+    public MarketSnapshot? FirstAtOrAfter(string ticker, DateTimeOffset at) =>
+        db.QuerySingle("SELECT * FROM market_snapshots WHERE ticker = $t AND observed_at >= $a ORDER BY observed_at, id LIMIT 1",
+            Map, ("$t", ticker), ("$a", Ts.ToText(at)));
+
     public MarketSnapshot? ById(long id) =>
         db.QuerySingle("SELECT * FROM market_snapshots WHERE id = $id", Map, ("$id", id));
 
@@ -53,25 +65,30 @@ public sealed class MarketStore(Db db)
             r => new RawRef(r.L("id"), r.S("url"), (int)r.L("http_status"), Ts.Parse(r.S("received_at")),
                 r.Str("server_date") is { } d ? Ts.Parse(d) : null, r.S("body_sha256")), ("$id", id));
 
-    public EventSnapshot? LatestEvent(string eventTicker, DateTimeOffset asOf) =>
+    /// <summary>
+    /// Event metadata for a snapshot: the observation from the same capture run (fetched moments after the market),
+    /// else the latest one observed before the snapshot. Never a later run's revision.
+    /// </summary>
+    public EventSnapshot? EventFor(MarketSnapshot s) =>
         db.QuerySingle("""
-            SELECT * FROM event_snapshots WHERE event_ticker = $e AND observed_at <= $t
-            ORDER BY observed_at DESC, id DESC LIMIT 1
+            SELECT * FROM event_snapshots WHERE event_ticker = $e AND (capture_run_id = $run OR observed_at <= $t)
+            ORDER BY (capture_run_id = $run) DESC, observed_at DESC, id DESC LIMIT 1
             """,
             r => new EventSnapshot(r.L("id"), r.L("raw_id"), Ts.Parse(r.S("observed_at")), r.S("event_ticker"),
                 r.S("series_ticker"), r.Str("title"), r.Str("settlement_sources_json"), r.Str("fee_type_override"),
                 r.DN("fee_multiplier_override")),
-            ("$e", eventTicker), ("$t", Ts.ToText(asOf)));
+            ("$e", s.EventTicker), ("$run", s.CaptureRunId), ("$t", Ts.ToText(s.ObservedAt)));
 
-    public SeriesSnapshot? LatestSeries(string seriesTicker, DateTimeOffset asOf) =>
+    /// <summary>Series metadata for a snapshot, with the same same-run-else-earlier rule as <see cref="EventFor"/>.</summary>
+    public SeriesSnapshot? SeriesFor(string seriesTicker, MarketSnapshot s) =>
         db.QuerySingle("""
-            SELECT * FROM series_snapshots WHERE series_ticker = $s AND observed_at <= $t
-            ORDER BY observed_at DESC, id DESC LIMIT 1
+            SELECT * FROM series_snapshots WHERE series_ticker = $s AND (capture_run_id = $run OR observed_at <= $t)
+            ORDER BY (capture_run_id = $run) DESC, observed_at DESC, id DESC LIMIT 1
             """,
             r => new SeriesSnapshot(r.L("id"), r.L("raw_id"), Ts.Parse(r.S("observed_at")), r.S("series_ticker"),
                 r.Str("title"), r.Str("category"), r.Str("fee_type"), r.DN("fee_multiplier"),
                 r.Str("settlement_sources_json"), r.Str("contract_terms_url")),
-            ("$s", seriesTicker), ("$t", Ts.ToText(asOf)));
+            ("$s", seriesTicker), ("$run", s.CaptureRunId), ("$t", Ts.ToText(s.ObservedAt)));
 
     private static MarketSnapshot Map(SqliteDataReader r) => new(
         r.L("id"), r.L("capture_run_id"), r.S("data_origin"), Ts.Parse(r.S("observed_at")), r.S("ticker"),

@@ -1,54 +1,70 @@
 # CLAUDE.md
 
-Personal Kalshi research and paper-trading system. .NET 10 LTS, SQLite, one CLI. Read `STATE.md` first for
-where things stand, `docs/PLAN.md` for scope, `docs/INTEGRATION_NOTES.md` before touching Kalshi or Claude code.
+Personal Kalshi research and paper-trading system: .NET 10 LTS, SQLite, one CLI.
+Requirements: `kalshi-claude-subscription-spec.md` (the spec). Read it and `STATE.md` before continuing work.
+Record important decisions in `docs/PLAN.md` and the next concrete action in `STATE.md`.
+Read `docs/INTEGRATION_NOTES.md` before touching any Kalshi or Claude integration code.
 
-## Hard rules
+## Rules (spec §12)
 
-- **Claude usage is subscription-only.** Never add the Anthropic API, an Anthropic/OpenAI/OpenRouter SDK, `ANTHROPIC_API_KEY`
-  handling, `--bare`, `--settings`, or any other paid model path. The only model path is `ClaudeResearchRunner` → official
-  `claude` CLI, gated by `BillingGuard`. `NoDirectModelApiTests` enforces part of this; do not weaken it.
-- **No live execution.** There is no order-placing Kalshi code. `RiskEngine` refuses `ExecutionMode.Live`. Adding
-  authenticated Kalshi calls, order placement, or live limits requires a separately authorized phase.
-- **Do not raise risk.** `RiskLimits.PaperDefaults` are paper-only. There is no live preset; do not add one.
-- **Labels are structural.** Synthetic data carries `data_origin = fixture:synthetic`; fills are `simulated = 1`;
-  research results are `validation_status = 'unvalidated'` (a schema CHECK). Never present any of these as real,
-  observed, or validated. Never invent a probability to make a trade happen.
-- **History is append-only.** `raw_responses`, `ledger_entries`, `paper_fills` have no-update/no-delete triggers.
-  Schema changes are new migrations appended in `Schema.cs`; never edit a shipped migration.
-- No secrets in the repo, chat, logs, or the database. Phase 1–2 needs no Kalshi credentials.
+1. Read the spec and `STATE.md` before continuing work. Record important decisions and the next concrete action.
+2. **No separately billed model APIs, usage credits, or alternate paid inference providers.** Kalshi's APIs and approved
+   public data APIs are permitted.
+   - The only model path is `ClaudeResearchRunner` → the official `claude` CLI, gated by `BillingGuard` and the owner's
+     usage-credit attestation.
+   - Never add `--bare`, `--settings`, API-key handling, or an Anthropic/OpenAI/OpenRouter SDK.
+3. **Default to paper.** Production order writes and funding are not authorized. No order-placing or authenticated Kalshi
+   code exists, and `RiskEngine` refuses `ExecutionMode.Live`.
+4. **Claude research is untrusted input.**
+   - Research records are evidence. Their experimental probabilities are stored for scoring only.
+   - Trading code never references research storage; `ResearchBoundaryTests` enforces this.
+   - Decisions come from deterministic, versioned forecast models and strategies.
+5. Use current official API contracts and keep source references. Do not blindly run third-party setup scripts,
+   plugins, or live tests.
+6. Never read, request in chat, commit, print, or pass production secrets to model tools. Keep research and execution
+   privileges separate.
+7. Continue authorized local research, implementation, fixes, and meaningful tests without asking at every small step.
+8. When access, billing, or live authority is missing, stop only the blocked part. Keep doing mocks, fixtures, docs, and
+   paper work.
+9. Show actual results and limitations.
+   - Label synthetic data (`data_origin = fixture:synthetic`), simulated fills (`simulated = 1`), placeholders, and
+     unvalidated probabilities (`validation_status = 'unvalidated'`, enforced by a schema CHECK).
+   - Never claim an edge because the software is complete.
+10. Do not auto-promote strategies, expand risk, deploy to a paid service, or enable live trading.
+    `RiskLimits.PaperFixture` holds the spec §6.2 paper values. There is no live preset.
+
+## Engineering invariants
+
+- **Append-only history:** `raw_responses`, `ledger_entries`, `paper_fills`, and `billing_attestations` have
+  no-update and no-delete triggers, with `recursive_triggers` ON. Schema changes are new migrations appended in
+  `Schema.cs`; never edit a shipped migration.
+- **One data origin per database** (spec §8.1). Fixture, demo, and production data never share a file.
+- Money, prices, and counts are `decimal`, stored as invariant TEXT.
+- Time comes from an injected `TimeProvider` and is persisted as `Ts.ToText` (UTC). Reporting days use America/Chicago.
+- Strategies and forecast models are pure: no clock, I/O, or randomness.
+- Paper fills come only from observations at or after simulated arrival, never from the decision snapshot.
+- Write transactions are `BEGIN IMMEDIATE`; risk checks and reservations commit together.
+- Any change to billing, research import, risk, accounting, or recovery needs a test that fails without it.
 
 ## Commands
 
 ```bash
-dotnet build                       # warnings are errors
-dotnet test                        # xUnit v3 on Microsoft.Testing.Platform (see global.json)
+dotnet build && dotnet test        # warnings are errors; xUnit v3 on Microsoft.Testing.Platform
 ./kb help                          # CLI (bash wrapper); or: dotnet run --project src/KalshiBot.Cli -- help
-./kb demo                          # offline end-to-end on synthetic fixtures (writes data/demo.db)
+./kb replay                        # frozen SYNTHETIC fixture replay (deterministic)
 ```
 
 ## Layout
 
 ```
 src/KalshiBot.Core/
-  Common/      Ts (UTC text timestamps), Dec (decimal money), Hash, CanonicalJson, DataOrigin
-  Storage/     Db (thin SQLite wrapper, InTransaction), Schema (migrations)
-  Kalshi/      KalshiPublicClient (GET-only), FixtureHandler, KalshiParse (payload -> records)
-  Recording/   Recorder (capture runs), MarketStore (read side), Watchlist
-  Trading/     IStrategy + EdgeThresholdStrategy, RiskEngine, FeeModel, PaperBroker, PaperLedger, PaperEngine, Controls
-  Research/    PacketExporter, ResultImporter (strict), BillingGuard, ClaudeResearchRunner, ProcessRunner
-  Status/      StatusReport (text + HTML)
-src/KalshiBot.Cli/   Commands, Demo, StatusServer (loopback, read-only)
-tests/KalshiBot.Tests/
-fixtures/synthetic/  hand-written Kalshi-shaped JSON, clearly synthetic
+  Common/     Ts, Dec, Hash, CanonicalJson, DataOrigin, ReportingDay, ProcessLock, ManualClock
+  Storage/    Db (thin SQLite wrapper), Schema (append-only migrations)
+  Kalshi/     KalshiPublicClient (GET-only), FixtureHandler, KalshiParse
+  Recording/  Recorder (+ DatabaseOrigin), MarketStore, Watchlist
+  Trading/    IForecastModel, IStrategy/EdgeThresholdStrategy, RiskEngine, FeeSchedules, PaperBroker, PaperLedger, PaperEngine
+  Research/   PacketExporter, ResearchImporter (schema-validated), BillingGuard, ClaudeResearchRunner, JsonSchemaSubset
+  Status/     StatusReport, FixtureReplay
+schemas/research-record.schema.json   research contract (spec §4.5), embedded in Core
+fixtures/synthetic/                   hand-written, clearly synthetic Kalshi-shaped JSON and fixture model
 ```
-
-## Conventions
-
-- Money, prices, and counts are `decimal`, stored as invariant TEXT. Never `double`.
-- Time comes from an injected `TimeProvider`; persisted as `Ts.ToText` (UTC, 7 fractional digits, `Z`).
-- Strategies are pure: no clock, I/O, or randomness. Decision ids hash strategy id + parameters + snapshot + estimate.
-- Prefer explicit SQL over abstractions. Keep the architecture small; no new services or frameworks without a reason
-  recorded in `docs/PLAN.md`.
-- Every behavior change touching billing, research import, risk, accounting, or recovery needs a test that fails without it.
-- Update `STATE.md` at each milestone: what works, how verified, limitations, next action.

@@ -94,7 +94,9 @@ public sealed class Db : IDisposable
     public T InTransaction<T>(Func<T> work)
     {
         if (_ambient is not null) return work();
-        using var tx = Connection.BeginTransaction();
+        // BEGIN IMMEDIATE: take the write lock up front so concurrent processes serialize their read-check-write
+        // sequences (risk reservations depend on this; spec 6.1, AC-06).
+        using var tx = Connection.BeginTransaction(deferred: false);
         _ambient = tx;
         try
         {

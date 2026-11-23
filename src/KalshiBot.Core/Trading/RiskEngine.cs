@@ -5,30 +5,37 @@ using KalshiBot.Core.Recording;
 namespace KalshiBot.Core.Trading;
 
 /// <summary>
-/// PAPER defaults only. Live bankroll and limits have not been chosen; there is deliberately no live preset.
+/// PAPER fixture limits from spec 6.2 (bankroll $500, $10 per event, $75 portfolio, $15 daily loss trigger,
+/// 3 entries/day) plus operational guards. Not live limits: live values are unset by design and there is no live preset.
 /// </summary>
 public sealed record RiskLimits
 {
+    public decimal StartingBankroll { get; init; } = 500m;
     public int MaxContractsPerOrder { get; init; } = 10;
-    public decimal MaxOrderCost { get; init; } = 10m;
-    public long MaxPositionPerMarketSide { get; init; } = 20;
-    public decimal MaxOpenCostBasis { get; init; } = 50m;
-    public decimal MaxDailyPremium { get; init; } = 25m;
+    public decimal MaxOrderCapitalAtRisk { get; init; } = 10m;
+    public decimal MaxMarketCapitalAtRisk { get; init; } = 10m;
+    public decimal MaxEventCapitalAtRisk { get; init; } = 10m;
+    public decimal MaxPortfolioCapitalAtRisk { get; init; } = 75m;
+    public decimal DailyLossTrigger { get; init; } = 15m;
+    public int MaxEntriesPerDay { get; init; } = 3;
+    public int MaxOpenOrders { get; init; } = 5;
+    public decimal MinCashBuffer { get; init; } = 0m;
     public TimeSpan MaxSnapshotAge { get; init; } = TimeSpan.FromMinutes(10);
-    public TimeSpan MaxEstimateAge { get; init; } = TimeSpan.FromHours(24);
+    public TimeSpan MaxForecastAge { get; init; } = TimeSpan.FromHours(24);
     public TimeSpan MinTimeToClose { get; init; } = TimeSpan.FromMinutes(30);
     public TimeSpan MaxClockSkew { get; init; } = TimeSpan.FromMinutes(2);
     public decimal MinPrice { get; init; } = 0.02m;
     public decimal MaxPrice { get; init; } = 0.98m;
 
-    public static RiskLimits PaperDefaults => new();
+    public static RiskLimits PaperFixture => new();
 }
 
-/// <param name="SnapshotLiquidityUsed">An earlier paper order already filled against this snapshot (same side and action).</param>
-/// <param name="PositionOrigins">Data origins of the paper orders that built the current position in this market.</param>
-public sealed record RiskContext(ExecutionMode Mode, MarketSnapshot Snapshot, string SnapshotRulesSha256,
-    ProbabilityEstimate? Estimate, AccountState Account, DateTimeOffset Now, decimal? FeeMultiplier = null,
-    bool SnapshotLiquidityUsed = false, IReadOnlyCollection<string>? PositionOrigins = null);
+/// <param name="RulesChanged">The snapshot's rules version differs from the market's previous snapshot.</param>
+/// <param name="ValuationProblem">Non-null when marked equity is uncertain (missing or stale marks): no new risk.</param>
+/// <param name="SignalAlreadyEntered">An entry already exists for this signal key (spec 7.2, AC-20).</param>
+public sealed record RiskContext(
+    ExecutionMode Mode, MarketSnapshot Snapshot, Forecast? Forecast, FeeContext? Fees, AccountState Account,
+    DateTimeOffset Now, bool RulesChanged = false, string? ValuationProblem = null, bool SignalAlreadyEntered = false);
 
 public sealed record RiskVerdict(bool Approved, IReadOnlyList<string> Reasons)
 {
@@ -36,8 +43,9 @@ public sealed record RiskVerdict(bool Approved, IReadOnlyList<string> Reasons)
 }
 
 /// <summary>
-/// Pure, fail-closed pre-trade checks. Every check runs and every failure is reported, in a fixed order,
-/// so a verdict is reproducible from its inputs.
+/// Pure, fail-closed pre-trade checks. Every check runs and every failure is reported in a fixed order, so a verdict
+/// is reproducible from its inputs (AC-10, AC-14). The caller evaluates and reserves inside one IMMEDIATE transaction,
+/// so concurrent candidates cannot spend the same capacity (AC-06).
 /// </summary>
 public sealed class RiskEngine(RiskLimits limits)
 {
@@ -47,30 +55,34 @@ public sealed class RiskEngine(RiskLimits limits)
     {
         var r = new List<string>();
         var s = c.Snapshot;
+        var a = c.Account;
 
-        // Authorization boundaries.
+        // Authority and mode boundaries.
         if (c.Mode != ExecutionMode.Paper) r.Add("live execution is not authorized in this phase");
-        if (c.Account.Halted) r.Add("kill switch engaged (run 'kb resume' to clear)");
-        if (c.Estimate is { IsValidated: false } && c.Mode != ExecutionMode.Paper)
-            r.Add("unvalidated research probability cannot drive non-paper execution");
+        if (a.Halted) r.Add("safety halt engaged (operator reset required: 'kb resume')");
+        if (a.DataOrigin != s.DataOrigin) r.Add($"account holds {a.DataOrigin} data; snapshot is {s.DataOrigin}");
+        if (c.ValuationProblem is { } vp) r.Add($"valuation uncertain: {vp}");
 
-        // Provenance.
-        if (c.Estimate is { } e)
+        // Required inputs (DATA-01, AC-10).
+        if (c.Forecast is not { } f) r.Add("no forecast from a deterministic model");
+        else
         {
-            if (e.PacketRulesSha256 != c.SnapshotRulesSha256) r.Add("market rules changed since the research packet was built");
-            if (e.PacketDataOrigin != s.DataOrigin) r.Add($"research estimate is from {e.PacketDataOrigin} data but the snapshot is {s.DataOrigin}");
-            if (c.Now - e.AsOf > limits.MaxEstimateAge) r.Add($"research estimate evidence (as_of) older than {limits.MaxEstimateAge}");
+            if (f.Synthetic != s.IsSynthetic) r.Add("forecast and snapshot differ in data origin");
+            if (c.Now - f.InputsAsOf > limits.MaxForecastAge) r.Add($"forecast inputs older than {limits.MaxForecastAge}");
         }
+        if (c.Fees is null) r.Add("fees unknown");
+        if (c.RulesChanged) r.Add("market rules changed since the previous snapshot; review with 'kb rules'");
+        if (c.SignalAlreadyEntered) r.Add("signal already entered; no re-entry rule is approved");
 
-        // Order shape.
+        // Order shape and price grid.
         if (o.Ticker != s.Ticker) r.Add("order ticker does not match snapshot");
         if (!Side.IsValid(o.Side)) r.Add($"invalid side '{o.Side}'");
         if (!OrderAction.IsValid(o.Action)) r.Add($"invalid action '{o.Action}'");
         if (o.Quantity <= 0) r.Add("quantity must be positive");
         if (o.Quantity > limits.MaxContractsPerOrder) r.Add($"quantity {o.Quantity} exceeds max {limits.MaxContractsPerOrder} per order");
         if (o.LimitPrice < limits.MinPrice || o.LimitPrice > limits.MaxPrice)
-            r.Add($"limit {Dec.ToText(o.LimitPrice)} outside [{Dec.ToText(limits.MinPrice)}, {Dec.ToText(limits.MaxPrice)}]");
-        else if (!IsOnTick(o.LimitPrice, s.PriceRangesJson)) r.Add($"limit {Dec.ToText(o.LimitPrice)} is not a valid tick for this market");
+            r.Add($"limit {Dec.Show(o.LimitPrice)} outside [{Dec.Show(limits.MinPrice)}, {Dec.Show(limits.MaxPrice)}]");
+        else if (!IsOnTick(o.LimitPrice, s.PriceRangesJson)) r.Add($"limit {Dec.ToText(o.LimitPrice)} is not on this market's price grid");
 
         // Market state and data freshness.
         if (s.MarketType != "binary") r.Add($"market_type '{s.MarketType}' unsupported");
@@ -80,27 +92,23 @@ public sealed class RiskEngine(RiskLimits limits)
         if (s.CloseTime is not { } close) r.Add("snapshot has no close_time");
         else if (close - c.Now < limits.MinTimeToClose) r.Add($"less than {limits.MinTimeToClose} to close");
 
-        if (c.SnapshotLiquidityUsed) r.Add("this snapshot's liquidity was already used by an earlier paper order; record a new snapshot");
-        if (c.PositionOrigins?.FirstOrDefault(o => o != s.DataOrigin) is { } other)
-            r.Add($"existing position in this market came from {other} data; snapshot is {s.DataOrigin}");
-
-        // Exposure and cash.
-        if (o.Quantity > 0 && o.LimitPrice is > 0m and < 1m)
+        // Capital at risk, reservations included (spec 6.1).
+        if (o.Action == OrderAction.Buy && o.Quantity > 0 && o.LimitPrice is > 0m and < 1m && c.Fees is { } fees)
         {
-            var held = c.Account.Held(o.Ticker, o.Side);
-            if (o.Action == OrderAction.Buy)
-            {
-                var worstCost = WorstCaseBuyCost(o, c.FeeMultiplier);
-                if (worstCost > limits.MaxOrderCost) r.Add($"worst-case cost {Dec.ToText(worstCost)} exceeds max order cost {Dec.ToText(limits.MaxOrderCost)}");
-                if (worstCost > c.Account.Cash) r.Add($"insufficient paper cash ({Dec.ToText(c.Account.Cash)} < {Dec.ToText(worstCost)})");
-                if (held + o.Quantity > limits.MaxPositionPerMarketSide) r.Add($"position would exceed {limits.MaxPositionPerMarketSide} contracts");
-                if (c.Account.OpenCostBasis + o.Quantity * o.LimitPrice > limits.MaxOpenCostBasis) r.Add($"open cost basis would exceed {Dec.ToText(limits.MaxOpenCostBasis)}");
-                if (c.Account.TodayPremiumSpent + worstCost > limits.MaxDailyPremium) r.Add($"daily premium would exceed {Dec.ToText(limits.MaxDailyPremium)}");
-            }
-            else if (o.Action == OrderAction.Sell && o.Quantity > held)
-            {
-                r.Add($"cannot sell {o.Quantity} {o.Side}; holding {held} (no short selling)");
-            }
+            var worst = WorstCaseBuyCost(o, fees);
+            var market = a.CapitalAtRiskByTicker.GetValueOrDefault(o.Ticker);
+            var evt = a.CapitalAtRiskByEvent.GetValueOrDefault(s.EventTicker);
+            if (worst > limits.MaxOrderCapitalAtRisk) r.Add($"order capital at risk {Dec.Show(worst)} exceeds {Dec.Show(limits.MaxOrderCapitalAtRisk)}");
+            if (market + worst > limits.MaxMarketCapitalAtRisk) r.Add($"market capital at risk would be {Dec.Show(market + worst)} > {Dec.Show(limits.MaxMarketCapitalAtRisk)}");
+            if (evt + worst > limits.MaxEventCapitalAtRisk) r.Add($"event capital at risk would be {Dec.Show(evt + worst)} > {Dec.Show(limits.MaxEventCapitalAtRisk)}");
+            if (a.CapitalAtRisk + worst > limits.MaxPortfolioCapitalAtRisk) r.Add($"portfolio capital at risk would be {Dec.Show(a.CapitalAtRisk + worst)} > {Dec.Show(limits.MaxPortfolioCapitalAtRisk)}");
+            if (a.AvailableCash - worst < limits.MinCashBuffer) r.Add($"insufficient available paper cash ({Dec.Show(a.AvailableCash)} after reservations; need {Dec.Show(worst)})");
+            if (a.EntriesToday >= limits.MaxEntriesPerDay) r.Add($"daily entry limit {limits.MaxEntriesPerDay} reached (America/Chicago day)");
+            if (a.OpenOrders >= limits.MaxOpenOrders) r.Add($"open order limit {limits.MaxOpenOrders} reached");
+        }
+        else if (o.Action == OrderAction.Sell && o.Quantity > a.Held(o.Ticker, o.Side))
+        {
+            r.Add($"cannot sell {o.Quantity} {o.Side}; holding {a.Held(o.Ticker, o.Side)} (no short selling)");
         }
 
         return new RiskVerdict(r.Count == 0, r);
@@ -108,13 +116,13 @@ public sealed class RiskEngine(RiskLimits limits)
 
     /// <summary>
     /// True upper bound on what a buy can cost: every contract at the limit, plus a separately rounded fee per contract
-    /// at the fee-maximizing price at or below the limit. The broker rounds fees per price level, which is never more
-    /// than rounding per contract, so actual cost cannot exceed this.
+    /// at the fee-maximizing price at or below the limit. The broker rounds per price level, which never exceeds
+    /// rounding per contract, so the actual cost cannot exceed this. Reservations hold exactly this amount.
     /// </summary>
-    public static decimal WorstCaseBuyCost(OrderIntent o, decimal? feeMultiplier)
+    public static decimal WorstCaseBuyCost(OrderIntent o, FeeContext fees)
     {
         var feePeak = Math.Min(o.LimitPrice, 0.5m);
-        return o.Quantity * o.LimitPrice + o.Quantity * FeeModel.TakerFee(1, feePeak, feeMultiplier);
+        return o.Quantity * o.LimitPrice + o.Quantity * FeeModel.TakerFee(1, feePeak, fees);
     }
 
     /// <summary>Tick check against Kalshi price_ranges [{start,end,step}]; without ranges, require whole cents.</summary>
