@@ -20,6 +20,7 @@ public static class CanonicalJson
     private static readonly JsonSerializerOptions Indented = new()
     {
         WriteIndented = true,
+        NewLine = "\n", // stored bytes identical on every OS
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 

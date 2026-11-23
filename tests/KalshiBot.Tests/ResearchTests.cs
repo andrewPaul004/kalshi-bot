@@ -33,6 +33,10 @@ public class ResearchExportTests
         Assert.All(p["sources"]!.AsArray(), s => Assert.Matches("^[0-9a-f]{64}$", (string)s!["bodySha256"]!));
         Assert.Equal(ResearchContract.RecordSchema, (string)p["resultContract"]!["schemaVersion"]!);
 
+        // Same bytes on every OS: no CRLF from a Windows checkout of the source.
+        Assert.DoesNotContain('\r', a.Json);
+        Assert.DoesNotContain('\r', ResearchContract.Task);
+
         // Prices are left out so research cannot anchor on them.
         Assert.DoesNotContain("yes_bid", a.Json);
         Assert.DoesNotContain("0.4500", a.Json);

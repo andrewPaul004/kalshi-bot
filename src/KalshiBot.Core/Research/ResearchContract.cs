@@ -21,7 +21,13 @@ public static class ResearchContract
     /// <summary>Structure-only derivative for `claude -p --json-schema`.</summary>
     public static string PortableSchemaJson { get; } = JsonSchemaSubset.PortableCopy(JsonNode.Parse(SchemaJson)!).ToJsonString();
 
-    public const string Task = """
+    /// <summary>
+    /// Task text with "\n" line endings on every platform: a Windows checkout gives raw string literals CRLF, which
+    /// would otherwise change the packet hash for the same snapshot from machine to machine.
+    /// </summary>
+    public static string Task { get; } = TaskText.ReplaceLineEndings("\n");
+
+    private const string TaskText = """
     Review this Kalshi market strictly against the rules text in this packet and return one research record.
     - Resolution follows rules.rulesPrimary, rules.rulesSecondary and rules.earlyCloseCondition, not the title.
     - Cite evidence you actually retrieved: url, retrievedAtUtc, publishedAtUtc if known, and the specific claim it supports.
