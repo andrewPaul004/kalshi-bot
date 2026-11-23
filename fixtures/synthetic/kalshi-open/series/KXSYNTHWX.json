@@ -1,0 +1,25 @@
+{
+  "series": {
+    "ticker": "KXSYNTHWX",
+    "frequency": "one-off",
+    "title": "SYNTHETIC FIXTURE series",
+    "category": "Climate and Weather",
+    "categories": [
+      "Climate and Weather"
+    ],
+    "tags": [
+      "synthetic"
+    ],
+    "settlement_sources": [
+      {
+        "name": "Fixture Weather Service (fictional)",
+        "url": "https://example.invalid/fixture-weather"
+      }
+    ],
+    "contract_url": "https://example.invalid/contract",
+    "contract_terms_url": "https://example.invalid/terms",
+    "fee_type": "quadratic",
+    "fee_multiplier": 1,
+    "additional_prohibitions": []
+  }
+}

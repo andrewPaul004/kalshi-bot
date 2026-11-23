@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>kb</AssemblyName>
+    <RootNamespace>KalshiBot.Cli</RootNamespace>
+    <!-- `dotnet run` keeps the caller's working directory so relative paths like data/ resolve where you ran it. -->
+    <RunWorkingDirectory>$(MSBuildStartupDirectory)</RunWorkingDirectory>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\KalshiBot.Core\KalshiBot.Core.csproj" />
+  </ItemGroup>
+</Project>

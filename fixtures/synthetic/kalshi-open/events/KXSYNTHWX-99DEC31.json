@@ -1,0 +1,19 @@
+{
+  "event": {
+    "event_ticker": "KXSYNTHWX-99DEC31",
+    "series_ticker": "KXSYNTHWX",
+    "sub_title": "Dec 31, 2099",
+    "title": "SYNTHETIC FIXTURE: Synthetic temperature on Dec 31, 2099",
+    "collateral_return_type": "DIRECNET",
+    "mutually_exclusive": false,
+    "settlement_sources": [
+      {
+        "name": "Fixture Weather Service (fictional)",
+        "url": "https://example.invalid/fixture-weather"
+      }
+    ],
+    "fee_type_override": null,
+    "fee_multiplier_override": null
+  },
+  "markets": []
+}

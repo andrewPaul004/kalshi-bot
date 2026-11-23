@@ -1,0 +1,10 @@
+bin/
+obj/
+data/
+*.db
+*.db-wal
+*.db-shm
+.vs/
+.idea/
+TestResults/
+*.user

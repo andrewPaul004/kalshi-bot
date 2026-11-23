@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/KalshiBot.Cli/KalshiBot.Cli.csproj" />
+    <Project Path="src/KalshiBot.Core/KalshiBot.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/KalshiBot.Tests/KalshiBot.Tests.csproj" />
+  </Folder>
+</Solution>
