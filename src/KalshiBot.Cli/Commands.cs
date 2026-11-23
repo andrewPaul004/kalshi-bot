@@ -326,11 +326,11 @@ public static class Commands
         if (r.AlreadyProcessed) Console.WriteLine("  already processed for this snapshot and estimate; nothing new submitted (idempotent rerun)");
         foreach (var o in r.Orders)
         {
-            Console.WriteLine($"  order {o.ClientOrderId}: {o.Intent.Action} {o.Intent.Quantity} {o.Intent.Side} @ {Dec.ToText(o.Intent.LimitPrice)} -> {o.Status.ToUpperInvariant()} (PAPER)");
+            Console.WriteLine($"  order {o.ClientOrderId}: {o.Intent.Action} {o.Intent.Quantity} {o.Intent.Side} @ {Dec.Show(o.Intent.LimitPrice)} -> {o.Status.ToUpperInvariant()} (PAPER)");
             if (!o.Verdict.Approved) foreach (var reason in o.Verdict.Reasons) Console.WriteLine($"    risk: {reason}");
-            foreach (var f in o.Fills) Console.WriteLine($"    SIMULATED fill {f.Quantity} @ {Dec.ToText(f.Price)} fee {Dec.ToText(f.Fee)}");
+            foreach (var f in o.Fills) Console.WriteLine($"    SIMULATED fill {f.Quantity} @ {Dec.Show(f.Price)} fee {Dec.Show(f.Fee)}");
         }
     }
 
-    private static string P(decimal? d) => d is null ? "-" : Dec.ToText(d.Value);
+    private static string P(decimal? d) => d is null ? "-" : Dec.Show(d.Value);
 }

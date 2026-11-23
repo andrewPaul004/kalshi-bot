@@ -89,9 +89,9 @@ public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, lon
         foreach (var a in Accounts)
         {
             var st = a.State;
-            sb.AppendLine($"  {st.Name}: cash {Dec.ToText(st.Cash)} mark {Dec.ToText(a.MarkValue)} equity {Dec.ToText(a.Equity)} " +
-                          $"(start {Dec.ToText(st.StartingCash)}, realized {Dec.ToText(st.RealizedPnl)}) ledger {(a.Problems.Count == 0 ? "OK" : "PROBLEMS: " + string.Join("; ", a.Problems))}");
-            foreach (var p in st.Positions) sb.AppendLine($"    {p.Ticker} {p.Side} x{p.Quantity} cost {Dec.ToText(p.CostBasis)}");
+            sb.AppendLine($"  {st.Name}: cash {Dec.Show(st.Cash)} mark {Dec.Show(a.MarkValue)} equity {Dec.Show(a.Equity)} " +
+                          $"(start {Dec.Show(st.StartingCash)}, realized {Dec.Show(st.RealizedPnl)}) ledger {(a.Problems.Count == 0 ? "OK" : "PROBLEMS: " + string.Join("; ", a.Problems))}");
+            foreach (var p in st.Positions) sb.AppendLine($"    {p.Ticker} {p.Side} x{p.Quantity} cost {Dec.Show(p.CostBasis)}");
         }
         sb.AppendLine();
         sb.AppendLine("recent paper orders:");
@@ -137,8 +137,8 @@ public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, lon
         foreach (var a in Accounts)
         {
             var st = a.State;
-            var pos = string.Join("<br>", st.Positions.Select(p => $"{H(p.Ticker)} {H(p.Side)} ×{p.Quantity} (cost {Dec.ToText(p.CostBasis)})"));
-            sb.Append($"<tr><td>{H(st.Name)}</td><td>{Dec.ToText(st.Cash)}</td><td>{Dec.ToText(a.MarkValue)}</td><td>{Dec.ToText(a.Equity)}</td><td>{Dec.ToText(st.RealizedPnl)}</td><td>{(pos.Length == 0 ? "-" : pos)}</td><td>{(a.Problems.Count == 0 ? "OK" : "<span class=\"b warn\">" + H(string.Join("; ", a.Problems)) + "</span>")}</td></tr>");
+            var pos = string.Join("<br>", st.Positions.Select(p => $"{H(p.Ticker)} {H(p.Side)} ×{p.Quantity} (cost {Dec.Show(p.CostBasis)})"));
+            sb.Append($"<tr><td>{H(st.Name)}</td><td>{Dec.Show(st.Cash)}</td><td>{Dec.Show(a.MarkValue)}</td><td>{Dec.Show(a.Equity)}</td><td>{Dec.Show(st.RealizedPnl)}</td><td>{(pos.Length == 0 ? "-" : pos)}</td><td>{(a.Problems.Count == 0 ? "OK" : "<span class=\"b warn\">" + H(string.Join("; ", a.Problems)) + "</span>")}</td></tr>");
         }
         sb.Append("</table></div>");
 
@@ -167,7 +167,7 @@ public sealed record StatusReport(DateTimeOffset GeneratedAt, string DbPath, lon
     }
 
     private static string Origin(string o) => DataOrigin.IsSynthetic(o) ? "SYNTHETIC" : o;
-    private static string P(decimal? d) => d is null ? "-" : Dec.ToText(d.Value);
+    private static string P(decimal? d) => d is null ? "-" : Dec.Show(d.Value);
     private static string Trim(string s, int n) => s.Length <= n ? s : s[..n] + "…";
     private static string Age(TimeSpan t) => t.TotalMinutes < 1 ? $"{(int)t.TotalSeconds}s" : t.TotalHours < 1 ? $"{(int)t.TotalMinutes}m" : t.TotalDays < 1 ? $"{t.TotalHours:0.#}h" : $"{t.TotalDays:0.#}d";
 }

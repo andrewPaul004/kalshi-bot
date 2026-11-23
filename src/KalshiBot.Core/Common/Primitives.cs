@@ -27,6 +27,9 @@ public static class Dec
 
     public static string ToText(decimal d) => d.ToString(CultureInfo.InvariantCulture);
 
+    /// <summary>Display only: at least 2 and at most 6 decimals (100.5300 -> 100.53). Storage keeps ToText.</summary>
+    public static string Show(decimal d) => d.ToString("0.00####", CultureInfo.InvariantCulture);
+
     public static decimal Parse(string s) => decimal.Parse(s, Strict, CultureInfo.InvariantCulture);
 
     public static decimal? ParseOrNull(string? s) =>

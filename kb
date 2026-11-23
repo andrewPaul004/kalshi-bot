@@ -2,5 +2,8 @@
 # Builds (incrementally) and runs the kalshi-bot CLI from any directory. Relative paths resolve from your cwd.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-dotnet build "$ROOT/src/KalshiBot.Cli/KalshiBot.Cli.csproj" -c Release -nologo -v quiet -clp:ErrorsOnly >&2
+if ! out=$(dotnet build "$ROOT/src/KalshiBot.Cli/KalshiBot.Cli.csproj" -c Release -nologo 2>&1); then
+  echo "$out" >&2
+  exit 1
+fi
 exec dotnet "$ROOT/src/KalshiBot.Cli/bin/Release/net10.0/kb.dll" "$@"

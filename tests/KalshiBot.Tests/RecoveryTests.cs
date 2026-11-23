@@ -167,6 +167,18 @@ public class RecoveryTests
         Assert.Equal(1, t.Db.Scalar<long>("PRAGMA foreign_keys"));
     }
 
+    [Theory]
+    [InlineData("100.5300", "100.53")]
+    [InlineData("0", "0.00")]
+    [InlineData("0.123456", "0.123456")]
+    [InlineData("-0.0200", "-0.02")]
+    public void Display_formatting_never_changes_stored_precision(string stored, string shown)
+    {
+        var d = Dec.Parse(stored);
+        Assert.Equal(shown, Dec.Show(d));
+        Assert.Equal(stored, Dec.ToText(d)); // storage text keeps the original scale
+    }
+
     [Fact]
     public void Timestamps_round_trip_exactly_and_sort_lexically()
     {
