@@ -103,5 +103,6 @@ scoped to this repository. No third-party code was copied, so the §10 per-copy 
   `data/archive.db` (origin `archive:history`, append-only, refuses truth and recording writes). The decision inputs for a
   climate date are fixed in `DecisionClock`: 15:00 Eastern the day before, the 12Z run, the 00Z forecast time after the day
   (checked: MAE 2.65 F over 5,429 days). MOS publication time could not be verified, so a 6 h availability lag is assumed and
-  must be measured by the live collector. GFS MOS is fully collected; the candle download is partial (stopped for low
-  memory, resumable). Quotes are sparse in thin tail buckets: only 9 of 34 sampled days had every market two-sided.
+  must be measured by the live collector. GFS MOS and candles are fully collected (9,568 windows, 0 failed; candle download was
+  resumed after a low-memory stop). Quotes are sparse in thin tail buckets: a two-sided quote exists on at least one market for
+  1,808 of 1,863 event-days but on every market for only 767. The market baseline needs a rule for markets with no real quote.
