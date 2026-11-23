@@ -16,3 +16,8 @@ catch (KalshiBotException e)
     Console.Error.WriteLine($"error: {e.Message}");
     return 1;
 }
+catch (Exception e) when (e is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
+{
+    Console.Error.WriteLine($"error: {e.Message}");
+    return 1;
+}

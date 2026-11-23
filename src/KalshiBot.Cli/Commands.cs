@@ -230,6 +230,7 @@ public static class Commands
                 var source = a.Opt("source") ?? "manual";
                 a.EnsureAllUsed();
                 if (source == "claude-subscription-cli") throw new UsageException("That source kind is reserved for 'kb research run'.");
+                if (!File.Exists(file)) throw new UsageException($"File not found: {Path.GetFullPath(file)}");
                 try
                 {
                     var r = new ResearchImporter(db, Clock).Import(File.ReadAllText(file), source);
