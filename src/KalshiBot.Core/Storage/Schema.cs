@@ -586,6 +586,91 @@ public static class Schema
         CREATE TRIGGER cli_highs_no_update BEFORE UPDATE ON cli_highs BEGIN SELECT RAISE(ABORT, 'cli_highs is append-only'); END;
         CREATE TRIGGER cli_highs_no_delete BEFORE DELETE ON cli_highs BEGIN SELECT RAISE(ABORT, 'cli_highs is append-only'); END;
         """),
+        (8, """
+        -- Historical inputs for Phase 3 Stage A (docs/PHASE3_PLAN.md W3): GFS MOS forecast runs from IEM and Kalshi hourly
+        -- candlesticks. Lives in its own database (origin 'archive:history'), apart from truth.db and any recording DB.
+        CREATE TABLE archive_runs (
+            id          INTEGER PRIMARY KEY,
+            started_at  TEXT NOT NULL,
+            finished_at TEXT,
+            status      TEXT NOT NULL CHECK (status IN ('running','completed','partial','failed','abandoned')),
+            source      TEXT NOT NULL CHECK (source IN ('iem-mos','kalshi-candles')),
+            data_origin TEXT NOT NULL,
+            scope       TEXT NOT NULL,
+            detail      TEXT
+        );
+
+        CREATE TABLE archive_raw (
+            id            INTEGER PRIMARY KEY,
+            run_id        INTEGER NOT NULL REFERENCES archive_runs(id),
+            url           TEXT NOT NULL,
+            http_status   INTEGER NOT NULL,
+            requested_at  TEXT NOT NULL,
+            received_at   TEXT NOT NULL,
+            server_date   TEXT,
+            body_sha256   TEXT NOT NULL,
+            body          TEXT NOT NULL
+        );
+        CREATE TRIGGER archive_raw_no_update BEFORE UPDATE ON archive_raw BEGIN SELECT RAISE(ABORT, 'archive_raw is append-only'); END;
+        CREATE TRIGGER archive_raw_no_delete BEFORE DELETE ON archive_raw BEGIN SELECT RAISE(ABORT, 'archive_raw is append-only'); END;
+
+        -- One row per MOS run and forecast time. runtime is the model cycle (UTC), NOT when the bulletin was published:
+        -- publication time is not in the archive (see the plan), so consumers must apply an explicit availability lag.
+        CREATE TABLE mos_rows (
+            id          INTEGER PRIMARY KEY,
+            run_id      INTEGER NOT NULL REFERENCES archive_runs(id),
+            raw_id      INTEGER NOT NULL REFERENCES archive_raw(id),
+            data_origin TEXT NOT NULL,
+            station     TEXT NOT NULL,
+            model       TEXT NOT NULL,
+            runtime     TEXT NOT NULL,
+            ftime       TEXT NOT NULL,
+            n_x         TEXT,
+            tmp         TEXT,
+            UNIQUE (station, model, runtime, ftime)
+        );
+        CREATE INDEX ix_mos_rows_run ON mos_rows (station, model, runtime);
+        CREATE TRIGGER mos_rows_no_update BEFORE UPDATE ON mos_rows BEGIN SELECT RAISE(ABORT, 'mos_rows is append-only'); END;
+        CREATE TRIGGER mos_rows_no_delete BEFORE DELETE ON mos_rows BEGIN SELECT RAISE(ABORT, 'mos_rows is append-only'); END;
+
+        -- One row per market and fetched window: the completion marker that makes a bulk fetch resumable. A window with
+        -- zero candles is still recorded (the market had no trades or quotes in it).
+        CREATE TABLE candle_fetches (
+            id             INTEGER PRIMARY KEY,
+            run_id         INTEGER NOT NULL REFERENCES archive_runs(id),
+            raw_id         INTEGER NOT NULL REFERENCES archive_raw(id),
+            data_origin    TEXT NOT NULL,
+            market_ticker  TEXT NOT NULL,
+            event_ticker   TEXT NOT NULL,
+            window_start   TEXT NOT NULL,
+            window_end     TEXT NOT NULL,
+            period_minutes INTEGER NOT NULL,
+            endpoint       TEXT NOT NULL CHECK (endpoint IN ('series','historical')),
+            candle_count   INTEGER NOT NULL,
+            received_at    TEXT NOT NULL,
+            UNIQUE (market_ticker, window_start, window_end, period_minutes)
+        );
+        CREATE TRIGGER candle_fetches_no_update BEFORE UPDATE ON candle_fetches BEGIN SELECT RAISE(ABORT, 'candle_fetches is append-only'); END;
+        CREATE TRIGGER candle_fetches_no_delete BEFORE DELETE ON candle_fetches BEGIN SELECT RAISE(ABORT, 'candle_fetches is append-only'); END;
+
+        -- Hourly bid/ask candles. end_period_ts is the end of the hour the candle covers (UTC). These are quote closes,
+        -- not executable depth: usable for a probability baseline, never for fills.
+        CREATE TABLE candles (
+            id             INTEGER PRIMARY KEY,
+            fetch_id       INTEGER NOT NULL REFERENCES candle_fetches(id),
+            data_origin    TEXT NOT NULL,
+            market_ticker  TEXT NOT NULL,
+            end_period_ts  TEXT NOT NULL,
+            yes_bid_close  TEXT,
+            yes_ask_close  TEXT,
+            price_close    TEXT,
+            volume         TEXT,
+            open_interest  TEXT,
+            UNIQUE (market_ticker, end_period_ts)
+        );
+        CREATE TRIGGER candles_no_update BEFORE UPDATE ON candles BEGIN SELECT RAISE(ABORT, 'candles is append-only'); END;
+        CREATE TRIGGER candles_no_delete BEFORE DELETE ON candles BEGIN SELECT RAISE(ABORT, 'candles is append-only'); END;
+        """),
     ];
 
     public static int LatestVersion => Migrations[^1].Version;

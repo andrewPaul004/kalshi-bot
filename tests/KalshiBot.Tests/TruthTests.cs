@@ -39,7 +39,7 @@ public class TruthTests
     }
 
     /// <summary>All six markets of an event settled on <paramref name="value"/>. Fresh nodes on every call.</summary>
-    private static List<JsonObject> Event(string ev, int value, string rules = WeatherCompany, Func<string, bool>? carriesValue = null, string? flip = null) =>
+    internal static List<JsonObject> Event(string ev, int value, string rules = WeatherCompany, Func<string, bool>? carriesValue = null, string? flip = null) =>
         Six.Select(s =>
         {
             var yes = OutcomeBucket.FromStrikes(s.Type, s.Floor, s.Cap)!.Contains(value);
@@ -48,7 +48,7 @@ public class TruthTests
             return Mk($"{ev}-{s.Suffix}", ev, s.Type, s.Floor, s.Cap, yes ? "yes" : "no", shown, rules);
         }).ToList();
 
-    private static string Page(IEnumerable<JsonObject> markets, string cursor = "") =>
+    internal static string Page(IEnumerable<JsonObject> markets, string cursor = "") =>
         new JsonObject { ["markets"] = new JsonArray(markets.Select(m => (JsonNode)m).ToArray()), ["cursor"] = cursor }.ToJsonString();
 
     private static IReadOnlyList<(SettledMarket, long)> Parsed(IEnumerable<JsonObject> markets) =>
@@ -176,10 +176,10 @@ public class TruthTests
 
     // ---- collectors ---------------------------------------------------------------------------------------------
 
-    private static KalshiPublicClient Client(HttpMessageHandler h, TimeProvider clock) =>
+    internal static KalshiPublicClient Client(HttpMessageHandler h, TimeProvider clock) =>
         new(new HttpClient(h), KalshiEndpoint.Production, clock, new KalshiClientOptions { MinInterval = TimeSpan.Zero, MaxRetries = 0 });
 
-    private static HttpResponseMessage Route(HttpRequestMessage r, Func<string> live, Func<string?, HttpResponseMessage> hist)
+    internal static HttpResponseMessage Route(HttpRequestMessage r, Func<string> live, Func<string?, HttpResponseMessage> hist)
     {
         var path = r.RequestUri!.AbsolutePath;
         var q = System.Web.HttpUtility.ParseQueryString(r.RequestUri.Query);

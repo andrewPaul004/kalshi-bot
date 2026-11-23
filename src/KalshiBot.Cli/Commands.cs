@@ -38,7 +38,12 @@ public static class Commands
                                       NWS climate-report daily highs from the IEM archive (cross-check and pre-2021 proxy)
         truth report [--station KNYC]                Kalshi vs NWS agreement, flagged and missing days, scoring series size
                                       (truth commands default to --db data/truth.db, never the recording database)
-        markets                      latest snapshot per market
+        archive collect-mos [--station KNYC] [--from-year 2010] [--to-year YEAR]
+                                      IEM GFS MOS runs, one request per year, into data/archive.db (slow on purpose)
+        archive collect-candles [--truth data/truth.db] [--from DATE] [--to DATE] [--limit N]
+                                      Kalshi hourly candles for the settled markets in truth.db; resumable
+        archive report [--station KNYC]              what is stored, and how many event-days have a two-sided quote at 15:00 ET
+        markets                     latest snapshot per market
         rules TICKER                  rules versions recorded for a market
 
         research export TICKER [--out DIR]          packet JSON + paste-ready prompt (default data/research)
@@ -66,8 +71,10 @@ public static class Commands
         var a = new Args(argv, Flags);
         if (a.Positionals.Count == 0 || a.Positionals[0] is "help" or "-h" or "--help") { Console.WriteLine(Usage); return 0; }
         var cmd = a.Positionals[0];
-        // Truth data has its own database (spec 8.1); $KALSHIBOT_DB, which points at the recording database, is ignored for it.
+        // Truth and archive data have their own databases (spec 8.1); $KALSHIBOT_DB, which points at the recording
+        // database, is ignored for them.
         var dbPath = a.Opt("db") ?? (cmd == "truth" ? Path.Combine("data", "truth.db")
+            : cmd == "archive" ? Path.Combine("data", "archive.db")
             : Environment.GetEnvironmentVariable("KALSHIBOT_DB") ?? Path.Combine("data", "kalshibot.db"));
         var sub = a.Positionals.Count > 1 ? a.Positionals[1] : null;
 
@@ -80,6 +87,7 @@ public static class Commands
             case "discover": return await Discover(a);
             case "forecast": return await Forecast(db, a, sub);
             case "truth": return await Truth(db, a, sub);
+            case "archive": return await Archive(db, a, sub);
             case "record": return await Record(db, a);
             case "markets": a.EnsureAllUsed(); return Markets(db);
             case "rules": a.EnsureAllUsed(); return Rules(db, a.Pos(1, "TICKER"));
@@ -286,6 +294,54 @@ public static class Commands
                 return 0;
             }
             default: throw new UsageException($"Unknown truth subcommand '{sub}'.");
+        }
+    }
+
+    private static async Task<int> Archive(Db db, Args a, string? sub)
+    {
+        switch (sub)
+        {
+            case "collect-mos":
+            {
+                var station = a.Opt("station") ?? "KNYC";
+                var from = int.Parse(a.Opt("from-year") ?? "2010", CultureInfo.InvariantCulture);
+                var to = int.Parse(a.Opt("to-year") ?? Clock.GetUtcNow().Year.ToString(CultureInfo.InvariantCulture), CultureInfo.InvariantCulture);
+                a.EnsureAllUsed();
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(180) };
+                var r = await new KalshiBot.Core.Archive.IemMosCollector(db, http, Clock).CollectAsync(station, "GFS", from, to);
+                Console.WriteLine($"archive run #{r.RunId} iem-mos {station} GFS {from}-{to}: {r.Status}, {r.Years} year(s), {r.Rows} row(s) " +
+                                  $"({r.Inserted} new, {r.Unchanged} unchanged, {r.Conflicts} conflicting)");
+                foreach (var e in r.Errors) Console.WriteLine($"  ! {e}");
+                return r.Status == "completed" ? 0 : 1;
+            }
+            case "collect-candles":
+            {
+                var truthPath = a.Opt("truth") ?? Path.Combine("data", "truth.db");
+                var from = a.Opt("from") is { } f ? DateOnly.ParseExact(f, "yyyy-MM-dd", CultureInfo.InvariantCulture) : (DateOnly?)null;
+                var to = a.Opt("to") is { } t ? DateOnly.ParseExact(t, "yyyy-MM-dd", CultureInfo.InvariantCulture) : (DateOnly?)null;
+                var limit = a.Opt("limit") is { } l ? int.Parse(l, CultureInfo.InvariantCulture) : int.MaxValue;
+                a.EnsureAllUsed();
+                if (!File.Exists(truthPath)) throw new UsageException($"No truth database at {truthPath}. Run `kb truth collect-kalshi` first.");
+                List<KalshiBot.Core.Archive.CandleTarget> targets;
+                using (var truth = Db.Open(truthPath))
+                    targets = KalshiBot.Core.Archive.ArchiveStore.TargetsFromTruth(truth)
+                        .Where(x => (from is null || x.ClimateDate >= from) && (to is null || x.ClimateDate <= to)).Take(limit).ToList();
+                using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(60) };
+                var client = new KalshiPublicClient(http, KalshiEndpoint.Production, Clock);
+                var r = await new KalshiBot.Core.Archive.KalshiCandleCollector(db, client, Clock).CollectAsync(targets, Console.WriteLine);
+                Console.WriteLine($"archive run #{r.RunId} kalshi-candles: {r.Status}, {r.Targets} market(s): {r.Fetched} fetched ({r.Candles} candles), " +
+                                  $"{r.AlreadyHave} already stored, {r.NotYetComplete} not yet complete, {r.Failed} failed");
+                foreach (var e in r.Errors) Console.WriteLine($"  ! {e}");
+                return r.Status == "completed" ? 0 : 1;
+            }
+            case "report":
+            {
+                var station = a.Opt("station") ?? "KNYC";
+                a.EnsureAllUsed();
+                Console.Write(KalshiBot.Core.Archive.ArchiveStore.Report(db, station).ToText());
+                return 0;
+            }
+            default: throw new UsageException($"Unknown archive subcommand '{sub}'.");
         }
     }
 

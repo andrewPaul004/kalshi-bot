@@ -68,6 +68,18 @@ public sealed class KalshiPublicClient(HttpClient http, KalshiEndpoint endpoint,
                  (historical ? "" : "&status=settled") + "&limit=1000" +
                  (string.IsNullOrEmpty(cursor) ? "" : $"&cursor={Esc(cursor)}"), ct);
 
+    /// <summary>Boundary between the live and the /historical partitions (<c>market_settled_ts</c>).</summary>
+    public Task<RawHttpResponse> GetHistoricalCutoffAsync(CancellationToken ct) => GetAsync("/historical/cutoff", ct);
+
+    /// <summary>
+    /// Candlesticks for one market. The series path serves recent markets (and, verified for Sep 2026, some older ones);
+    /// the historical path serves markets before the cutoff. They answer with different field names for the same data.
+    /// </summary>
+    public Task<RawHttpResponse> GetCandlesticksAsync(string seriesTicker, string marketTicker, DateTimeOffset start, DateTimeOffset end,
+        int periodMinutes, bool historical, CancellationToken ct) =>
+        GetAsync((historical ? $"/historical/markets/{Esc(marketTicker)}/candlesticks" : $"/series/{Esc(seriesTicker)}/markets/{Esc(marketTicker)}/candlesticks") +
+                 $"?start_ts={start.ToUnixTimeSeconds()}&end_ts={end.ToUnixTimeSeconds()}&period_interval={periodMinutes}", ct);
+
     private static string Esc(string s) => Uri.EscapeDataString(s);
 
     private async Task<RawHttpResponse> GetAsync(string relative, CancellationToken ct)
