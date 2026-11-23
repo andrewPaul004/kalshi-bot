@@ -201,3 +201,23 @@ public class RecorderTests
         new(new HttpClient(h), KalshiEndpoint.Fixture, clock,
             new KalshiClientOptions { MinInterval = TimeSpan.Zero, MaxBackoff = TimeSpan.FromMilliseconds(10) });
 }
+
+public class SeriesWatchTests
+{
+    [Fact]
+    public async Task Watched_series_records_every_open_market_and_reports_unknown_series()
+    {
+        using var t = new TempDb();
+        var clock = FixedClock.Default();
+        var w = new Watchlist(t.Db, clock);
+        Assert.True(w.AddSeries("KXSYNTHWX"));
+        Assert.False(w.AddSeries("KXSYNTHWX"));
+        Assert.Equal(["KXSYNTHWX"], w.ListSeries());
+
+        var summary = await new Recorder(t.Db, Fx.Client(Fx.Open, clock), clock).CaptureAsync([], ["KXSYNTHWX", "KXNOSUCH"]);
+        Assert.Equal(2, summary.Snapshots); // both open markets discovered from the series list
+        Assert.Contains("series KXNOSUCH: market list HTTP 404", summary.Errors);
+        Assert.Equal("partial", summary.Status);
+        Assert.Equal(1, t.Db.Scalar<long>("SELECT COUNT(*) FROM raw_responses WHERE url LIKE '%series_ticker=KXSYNTHWX%'"));
+    }
+}

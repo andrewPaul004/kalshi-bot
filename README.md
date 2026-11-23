@@ -32,17 +32,23 @@ Fees also stay "unknown" until Kalshi's schedule is verified.
 
 ```bash
 ./kb discover --series KXHIGHNY                  # list open tickers (read-only, public endpoint)
-./kb watch add <TICKER>
+./kb watch add <TICKER>                          # one market, or:
+./kb watch add-series KXHIGHNY                   # every open market in a series (daily markets roll over)
 ./kb record                                      # one capture; --repeat N --interval 60 for more
 ./kb markets && ./kb rules <TICKER>
 ./kb research attest-billing --usage-credits-disabled   # after YOU confirm usage credits are off in claude.ai
 ./kb research export <TICKER>                    # packet + paste-ready prompt in data/research/
 ./kb research run <PACKET_ID>                    # guarded subscription round trip; or: kb research import FILE
+./kb research score                              # Brier score vs settled outcomes, market mid as baseline
 ./kb paper init && ./kb paper run <TICKER> --min-edge 0.05   # records the decision (abstains without a model)
 ./kb paper resolve && ./kb paper settle && ./kb paper verify
 ./kb status --html data/status.html              # or: ./kb serve  (http://127.0.0.1:5080)
 ./kb halt "reason" / ./kb resume                 # safety halt
 ```
+
+Scheduled recording on Windows, every 15 minutes:
+`schtasks /Create /TN "kalshi-bot record" /SC MINUTE /MO 15 /TR "<full path>\record-scheduled.cmd" /F`.
+Output goes to `data\record.log`. Remove it with `schtasks /Delete /TN "kalshi-bot record" /F`.
 
 Use one database per data origin, e.g. `--db data/fixtures.db` for fixture experiments. The default
 `data/kalshibot.db` is for production observations.

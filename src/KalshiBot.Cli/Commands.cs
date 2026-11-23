@@ -23,6 +23,7 @@ public static class Commands
         global:  --db PATH            SQLite file (default $KALSHIBOT_DB or data/kalshibot.db). One data origin per file.
 
         watch add TICKER...           add markets to record          watch list | watch remove TICKER
+        watch add-series SERIES       record every open market in a series each capture   watch remove-series SERIES
         discover --series SERIES      list open tickers in a series (live, read-only, not stored) [--demo]
         record                        record watched markets once from Kalshi production (public endpoints)
                [--demo]               ...from Kalshi demo instead (use a separate --db)
@@ -37,6 +38,7 @@ public static class Commands
         research attest-billing --usage-credits-disabled            record that YOU checked usage credits are off
         research run PACKET_ID [--claude PATH] [--model NAME] [--force]   one guarded subscription round trip
         research list
+        research score                              Brier score of research probabilities vs settled outcomes
 
         paper init [--account NAME] [--cash AMOUNT]  paper account bound to this db's data origin (default 500.00)
         paper run TICKER [--account NAME] [--min-edge X] [--series S]...
@@ -114,8 +116,15 @@ public static class Commands
             case "remove":
                 Console.WriteLine(w.Remove(a.Pos(2, "TICKER")) ? "removed" : "not on watchlist");
                 return 0;
+            case "add-series":
+                foreach (var sr in a.Positionals.Skip(2)) Console.WriteLine(w.AddSeries(sr) ? $"watching series {sr} (all open markets)" : $"already watching series {sr}");
+                return 0;
+            case "remove-series":
+                Console.WriteLine(w.RemoveSeries(a.Pos(2, "SERIES")) ? "removed" : "series not on watchlist");
+                return 0;
             case "list" or null:
                 foreach (var t in w.List()) Console.WriteLine(t);
+                foreach (var sr in w.ListSeries()) Console.WriteLine($"{sr} (series)");
                 return 0;
             default: throw new UsageException($"Unknown watch subcommand '{sub}'.");
         }
@@ -163,8 +172,15 @@ public static class Commands
         var repeat = int.Parse(a.Opt("repeat") ?? "1", CultureInfo.InvariantCulture);
         var interval = TimeSpan.FromSeconds(int.Parse(a.Opt("interval") ?? "60", CultureInfo.InvariantCulture));
         a.EnsureAllUsed();
-        if (tickers.Count == 0) tickers = new Watchlist(db, Clock).List();
-        if (tickers.Count == 0) throw new UsageException("Nothing to record: add markets with 'kb watch add TICKER' or pass --ticker.");
+        var series = new List<string>();
+        if (tickers.Count == 0)
+        {
+            tickers = new Watchlist(db, Clock).List();
+            series = new Watchlist(db, Clock).ListSeries();
+        }
+        if (tickers.Count == 0 && series.Count == 0)
+            throw new UsageException("Nothing to record: add markets with 'kb watch add TICKER' or 'kb watch add-series SERIES', or pass --ticker.");
+        using var recorderLock = ProcessLock.Acquire(LockPath(db, "recorder"), "recorder");
         if (repeat < 1 || interval < TimeSpan.FromSeconds(5)) throw new UsageException("--repeat must be >= 1 and --interval >= 5 seconds.");
 
         var recorder = new Recorder(db, client, Clock);
@@ -172,7 +188,7 @@ public static class Commands
         for (var i = 0; i < repeat; i++)
         {
             if (i > 0) await Task.Delay(interval);
-            var s = await recorder.CaptureAsync(tickers);
+            var s = await recorder.CaptureAsync(tickers, series);
             Console.WriteLine($"capture run #{s.RunId}: {s.Status} [{(DataOrigin.IsSynthetic(s.DataOrigin) ? "SYNTHETIC" : s.DataOrigin)}] " +
                               $"{s.Snapshots} snapshot(s), {s.RulesChanges} new rules version(s)");
             foreach (var e in s.Errors) Console.WriteLine($"  ! {e}");
@@ -285,6 +301,22 @@ public static class Commands
                                       $"p_yes={(r.ExperimentalProbability is { } p ? Dec.Show(p) + " (scoring only)" : "-")} via {r.SourceKind} " +
                                       $"[{(DataOrigin.IsSynthetic(r.DataOrigin) ? "SYNTHETIC" : r.DataOrigin)}] valid until {Ts.ToText(r.ValidUntilUtc)}");
                 return 0;
+            case "score":
+            {
+                a.EnsureAllUsed();
+                var score = ResearchScoring.Score(db);
+                Console.WriteLine($"research records: {score.Records}; with an experimental probability: {score.WithProbability}; awaiting settlement: {score.Unresolved}");
+                foreach (var r in score.Scored)
+                    Console.WriteLine($"  #{r.RecordId} {r.MarketTicker} p_yes={Dec.Show(r.Probability)} outcome={(r.Outcome == 1 ? "yes" : "no")} " +
+                                      $"brier={Dec.Show(Math.Round(r.Brier, 4))} market_mid={(r.MarketMid is { } m ? Dec.Show(m) : "-")} " +
+                                      $"market_brier={(r.MarketBrier is { } mb ? Dec.Show(Math.Round(mb, 4)) : "-")} via {r.SourceKind}" +
+                                      (DataOrigin.IsSynthetic(r.DataOrigin) ? " [SYNTHETIC]" : ""));
+                if (score.Scored.Count > 0)
+                    Console.WriteLine($"mean brier {Dec.Show(Math.Round(score.MeanBrier!.Value, 4))} vs market {(score.MeanMarketBrier is { } mm ? Dec.Show(Math.Round(mm, 4)) : "-")} " +
+                                      $"over {score.Scored.Count} record(s) in {score.IndependentEvents} independent event(s). " +
+                                      "Lower is better. A handful of events is not evidence of skill.");
+                return 0;
+            }
             default: throw new UsageException($"Unknown research subcommand '{sub}'.");
         }
     }

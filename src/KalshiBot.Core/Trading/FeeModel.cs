@@ -21,8 +21,26 @@ public static class FeeSchedules
         VerifiedOn: null, EffectiveFrom: DateTimeOffset.MinValue, TakerCoefficient: 0.07m,
         FeeTypes: new HashSet<string>(StringComparer.Ordinal) { "quadratic" }, SyntheticOnly: true);
 
-    /// <summary>Verified real schedules. Empty until verified; live-origin data therefore has unknown fees.</summary>
-    public static IReadOnlyList<FeeSchedule> Verified { get; } = [];
+    /// <summary>
+    /// Kalshi general taker fee, from the Kalshi Fee Schedule PDF "Last updated and effective: July 7, 2026"
+    /// (sha256 c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601), reviewed 2026-11-23.
+    /// fees = round up(M x 0.07 x C x P x (1-P)), M = per-series multiplier (default 1). The PDF text says the
+    /// fee rounds so fee + position cost lands on a centicent, but its own General Trading Fees Table matches
+    /// rounding up to a whole cent; we use the table's (higher) cent rounding. Maker fees (0.0175, default M = 0)
+    /// apply only to resting orders, which paper never places, so quadratic_with_maker_fees prices takers the same.
+    /// </summary>
+    public static readonly FeeSchedule KalshiGeneral20260707 = new(
+        "kalshi-general-2026-07-07",
+        "Kalshi Fee Schedule PDF, last updated and effective July 7, 2026 (sha256 c326a69f...9601); general taker formula, cent rounding per the published table",
+        VerifiedOn: new DateOnly(2026, 11, 23), EffectiveFrom: new DateTimeOffset(2026, 7, 7, 4, 0, 0, TimeSpan.Zero),
+        TakerCoefficient: 0.07m,
+        FeeTypes: new HashSet<string>(StringComparer.Ordinal) { "quadratic", "quadratic_with_maker_fees" }, SyntheticOnly: false);
+
+    /// <summary>
+    /// Verified real schedules. Re-check https://kalshi.com/fee-schedule for scheduled changes; add a new entry with
+    /// its own effective date rather than editing this one.
+    /// </summary>
+    public static IReadOnlyList<FeeSchedule> Verified { get; } = [KalshiGeneral20260707];
 
     public static FeeContext? Resolve(string dataOrigin, string? feeType, decimal? multiplier, DateTimeOffset at, out string? reason)
     {
@@ -50,7 +68,8 @@ public static class FeeModel
     {
         if (contracts <= 0) return 0m;
         if (price is <= 0m or >= 1m) throw new ArgumentOutOfRangeException(nameof(price), price, "Price must be in (0, 1).");
-        // Multiplier semantics are unverified; it may only raise the fee.
+        // The schedule's M can be 0 (fee-free series) or above 1; the API's single fee_multiplier is not documented as
+        // the taker M, so paper uses max(1, M): never below the standard fee.
         var multiplier = Math.Max(1m, fees.Multiplier ?? 1m);
         return Dec.CeilCents(fees.TakerCoefficient * multiplier * contracts * price * (1m - price));
     }

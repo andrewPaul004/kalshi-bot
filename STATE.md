@@ -1,6 +1,6 @@
 # State
 
-_Last updated 2026-11-23. Milestone: Phases 0–2 aligned with spec v2.0 (`kalshi-claude-subscription-spec.md`)._
+_Last updated 2026-11-23. Milestone: Phases 0–2 complete on the operator's machine; Phase 3 started (KXHIGHNY)._
 
 ## Mode
 
@@ -41,6 +41,18 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
 - The research contract now follows §4.5.
 - The pre-spec tables were retired by migration 3 (`legacy_*_v1`, data kept).
 
+**Verified on the operator's Windows machine (2026-11-23):**
+- A production capture of KXHIGHNY-26NOV24-T56.
+- A research packet exported, and a manual research record imported.
+- `kb research run`: IMPORTED, with auth claude.ai on a Team plan (record `insufficient_evidence`).
+
+**Added since:**
+- A verified Kalshi fee schedule (reproduces Kalshi's fee table).
+- Series watching (`watch add-series`).
+- A recorder lock, so scheduled and manual runs can't collide.
+- `record-scheduled.cmd` for Windows Task Scheduler.
+- `research score` (Brier score against outcome and against the same-time market mid). 162 tests.
+
 ## Blockers (exact)
 
 1. **No live Kalshi data here.** The egress proxy returns 403 for `external-api.kalshi.com`, `api.elections.kalshi.com`,
@@ -48,7 +60,8 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
 2. **The Claude round trip was not run.** In this cloud container, `claude auth status` reports `oauth_token` without
    `CLAUDE_CODE_OAUTH_TOKEN`. The guard cannot prove subscription billing and refuses, by design and audited.
    No model call was made.
-3. **Kalshi fee schedule not verified** (kalshi.com unreachable). Real-data candidates are rejected with "fees unknown".
+3. **From this cloud environment only:** Kalshi, NWS, and archive hosts are unreachable, so live data and forecast
+   collection run on the operator's machine until those hosts are allowed.
 
 ## Known limitations
 
@@ -62,18 +75,16 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
 
 ## Next concrete actions
 
-1. **On your machine:** a manual subscription round trip, run in a separate database for production observations.
-   On Windows, use `.\kb.cmd` wherever this says `./kb`.
-   ```bash
-   claude auth status                       # expect "authMethod": "claude.ai" and a subscriptionType
-   # In claude.ai settings, confirm usage credits / extra usage are OFF, then:
-   ./kb research attest-billing --usage-credits-disabled
-   ./kb discover --series <SERIES>          # pick 1–3 markets in one candidate category
-   ./kb watch add <TICKER> && ./kb record
-   ./kb research export <TICKER>
-   ./kb research run <PACKET_ID>            # or paste data/research/<id>.prompt.md into Claude, then: kb research import FILE
-   ./kb status --html data/status.html
+1. **Operator (Windows, in the kalshi-bot folder):**
+   ```powershell
+   git pull
+   .\kb.cmd watch add-series KXHIGHNY
+   .\kb.cmd record
+   schtasks /Create /TN "kalshi-bot record" /SC MINUTE /MO 15 /TR "C:\Users\AndrewPaul\source\repos\Personal\Kalshi-Trader\kalshi-bot\record-scheduled.cmd" /F
    ```
-2. **Verify Kalshi's fee schedule** and add it to `FeeSchedules.Verified`, with source, verification date, and effective date.
-3. **Phase 3:** choose one category (the spec suggests weather as a candidate; the data checks come first), freeze an
-   evaluation protocol, and start scheduled recording.
+   After Nov 24's market settles (about 8 AM ET Nov 25), run `.\kb.cmd research score` to score the first two records.
+2. **Next build: the NWS forecast collector** (spec 3.1 evidence collector). It records NWS point-forecast vintages for
+   Central Park with their issue times. Then measure forecast error from historical archives and freeze a Phase 3
+   evaluation protocol before scoring any model.
+3. Optional: allow `external-api.kalshi.com`, `api.weather.gov`, and `mesonet.agron.iastate.edu` in the cloud
+   environment's network settings, so collectors can be verified against live data from here.

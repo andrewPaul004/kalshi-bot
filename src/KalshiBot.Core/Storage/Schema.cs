@@ -445,6 +445,13 @@ public static class Schema
             PRIMARY KEY (account_id, reporting_day)
         );
         """),
+        (4, """
+        -- Series watched as a whole: each capture records every open market in the series (daily markets roll over).
+        CREATE TABLE watchlist_series (
+            series_ticker TEXT PRIMARY KEY,
+            added_at      TEXT NOT NULL
+        );
+        """),
     ];
 
     public static int LatestVersion => Migrations[^1].Version;

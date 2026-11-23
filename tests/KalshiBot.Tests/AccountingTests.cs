@@ -22,14 +22,47 @@ public class FeeAndFillTests
     public void Fee_multiplier_can_only_raise_the_fee() =>
         Assert.Equal(FeeModel.TakerFee(10, 0.5m, Fees), FeeModel.TakerFee(10, 0.5m, Fees with { Multiplier = 0.5m }));
 
-    [Fact] // DATA-01
-    public void Live_data_has_no_fee_schedule_until_one_is_verified()
+    [Fact] // DATA-01: fees resolve only from a verified, effective schedule for a known fee type
+    public void Fee_schedules_resolve_only_when_verified_effective_and_known()
     {
-        Assert.NotNull(FeeSchedules.Resolve(DataOrigin.Synthetic, "quadratic", 1m, DateTimeOffset.UtcNow, out _));
-        Assert.Null(FeeSchedules.Resolve(DataOrigin.LiveProduction, "quadratic", 1m, DateTimeOffset.UtcNow, out var why));
+        var now = new DateTimeOffset(2026, 11, 23, 18, 0, 0, TimeSpan.Zero);
+        Assert.Equal("synthetic-fixture-quadratic-0.07", FeeSchedules.Resolve(DataOrigin.Synthetic, "quadratic", 1m, now, out _)!.ScheduleId);
+        Assert.Equal("kalshi-general-2026-07-07", FeeSchedules.Resolve(DataOrigin.LiveProduction, "quadratic", 1m, now, out _)!.ScheduleId);
+        Assert.Equal("kalshi-general-2026-07-07", FeeSchedules.Resolve(DataOrigin.LiveProduction, "quadratic_with_maker_fees", 1m, now, out _)!.ScheduleId);
+        Assert.Null(FeeSchedules.Resolve(DataOrigin.LiveProduction, "quadratic", 1m, new DateTimeOffset(2026, 7, 1, 0, 0, 0, TimeSpan.Zero), out _));
+        Assert.Null(FeeSchedules.Resolve(DataOrigin.LiveProduction, "flat", 1m, now, out var why));
         Assert.Contains("no verified fee schedule", why);
-        Assert.Null(FeeSchedules.Resolve(DataOrigin.Synthetic, "flat", 1m, DateTimeOffset.UtcNow, out _));
-        Assert.Null(FeeSchedules.Resolve(DataOrigin.Synthetic, null, 1m, DateTimeOffset.UtcNow, out _));
+        Assert.Null(FeeSchedules.Resolve(DataOrigin.LiveProduction, "quadratic_with_combo_maker_fees", 1m, now, out _));
+        Assert.Null(FeeSchedules.Resolve(DataOrigin.LiveProduction, null, 1m, now, out _));
+    }
+
+    [Theory] // Every row of the PDF's General Trading Fees Table (fee for 1 and for 100 contracts)
+    [InlineData("0.01", "0.01", "0.07")]
+    [InlineData("0.05", "0.01", "0.34")]
+    [InlineData("0.10", "0.01", "0.63")]
+    [InlineData("0.15", "0.01", "0.90")]
+    [InlineData("0.20", "0.02", "1.12")]
+    [InlineData("0.25", "0.02", "1.32")]
+    [InlineData("0.30", "0.02", "1.47")]
+    [InlineData("0.35", "0.02", "1.60")]
+    [InlineData("0.40", "0.02", "1.68")]
+    [InlineData("0.45", "0.02", "1.74")]
+    [InlineData("0.50", "0.02", "1.75")]
+    [InlineData("0.55", "0.02", "1.74")]
+    [InlineData("0.60", "0.02", "1.68")]
+    [InlineData("0.65", "0.02", "1.60")]
+    [InlineData("0.70", "0.02", "1.47")]
+    [InlineData("0.75", "0.02", "1.32")]
+    [InlineData("0.80", "0.02", "1.12")]
+    [InlineData("0.85", "0.01", "0.90")]
+    [InlineData("0.90", "0.01", "0.63")]
+    [InlineData("0.95", "0.01", "0.34")]
+    [InlineData("0.99", "0.01", "0.07")]
+    public void Verified_schedule_reproduces_kalshis_published_fee_table(string price, string fee1, string fee100)
+    {
+        var fees = FeeSchedules.Resolve(DataOrigin.LiveProduction, "quadratic", 1m, DateTimeOffset.Parse("2026-11-23T00:00:00Z"), out _)!;
+        Assert.Equal(decimal.Parse(fee1), FeeModel.TakerFee(1, decimal.Parse(price), fees));
+        Assert.Equal(decimal.Parse(fee100), FeeModel.TakerFee(100, decimal.Parse(price), fees));
     }
 
     private static readonly OrderBook Book = new(

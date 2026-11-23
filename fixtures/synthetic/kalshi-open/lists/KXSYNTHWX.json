@@ -1,0 +1,7 @@
+{
+  "markets": [
+    { "ticker": "KXSYNTHWX-99DEC31-T50", "event_ticker": "KXSYNTHWX-99DEC31", "status": "active" },
+    { "ticker": "KXSYNTHWX-99DEC31-T60", "event_ticker": "KXSYNTHWX-99DEC31", "status": "active" }
+  ],
+  "cursor": ""
+}

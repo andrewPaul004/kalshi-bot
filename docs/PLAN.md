@@ -27,8 +27,8 @@ scoped to this repository. No third-party code was copied, so the §10 per-copy 
 |---|---|
 | 0 Project and integration facts | Done: docs, verified facts, reuse decision. |
 | 1 Recorder and offline paper slice | Done. Replay: `kb replay`. Live capture is blocked here by network policy. |
-| 2 Claude research workflow | Done except the real subscription round trip, which is blocked here (STATE.md). |
-| 3 One candidate strategy and prospective evaluation | Next. Needs real data, a category choice, and a frozen evaluation protocol. |
+| 2 Claude research workflow | Done. Manual round trip, plus an automated `kb research run` IMPORTED on the operator's Windows machine (2026-11-23). |
+| 3 One candidate strategy and prospective evaluation | Started. Category: NYC daily high temperature (KXHIGHNY). Done so far: series watching, scheduled recording, research scoring. |
 | 4 Demo execution and recovery | Not started. Separately authorized: demo credentials, the exchange lifecycle, AC-07/08/18/19. |
 | 5 Live pilot | Not authorized. |
 | 6 Optional improvements | Not started. |
@@ -72,3 +72,10 @@ scoped to this repository. No third-party code was copied, so the §10 per-copy 
   rather than editing shipped migrations.
 - **2026-11-23 Research bounds.** Claude Code 2.1.330 has no max-turns flag, so research runs are bounded by a 5-minute
   timeout and web-only tools. Revisit after CLI upgrades.
+- **2026-11-23 Phase 3 category: NYC daily high temperature (KXHIGHNY).** Operator deferred the choice. Reasons:
+  - Daily events with one clear settlement source (the Weather Company value for CLINYC).
+  - Public forecast data with issue times (NWS) and historical forecast archives for measuring error.
+  - Caveat: the strikes within one day are correlated, so each day is roughly one independent observation.
+  - Not a claim of edge.
+- **2026-11-23 Fees verified** from the operator-provided Kalshi Fee Schedule PDF, effective 2026-07-07 (INTEGRATION_NOTES).
+  Real-data candidates are no longer blocked for fees. With no validated model, they still abstain.

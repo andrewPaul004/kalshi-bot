@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using KalshiBot.Core.Common;
 using KalshiBot.Core.Research;
+using KalshiBot.Core.Status;
 using Xunit;
 
 namespace KalshiBot.Tests;
@@ -248,5 +249,39 @@ public class ResearchImportTests
         var live = new PacketExporter(t.Db, clock).Export(Fx.T50);
         Assert.Contains("synthetic-fixture records may only answer packets built from synthetic data",
             Reject(t, clock, Fx.ValidRecord(live, clock).ToJsonString(), "synthetic-fixture"));
+    }
+}
+
+public class ResearchScoringTests
+{
+    [Fact]
+    public void Settled_records_are_scored_against_outcome_and_same_time_market_mid()
+    {
+        using var t = new TempDb();
+        FixtureReplay.Run(t.Db, new ManualClock(FixtureReplay.Start), Fx.Root, _ => { });
+        var score = ResearchScoring.Score(t.Db);
+        var r = Assert.Single(score.Scored);
+        // Replay: SYNTHETIC record p=0.99 on T50 (packet snapshot yes 0.40/0.45), T50 settles yes.
+        Assert.Equal(1, r.Outcome);
+        Assert.Equal(0.0001m, r.Brier);
+        Assert.Equal(0.425m, r.MarketMid);
+        Assert.Equal(0.330625m, r.MarketBrier);
+        Assert.Equal(1, score.IndependentEvents);
+        Assert.Equal(0, score.Unresolved);
+    }
+
+    [Fact]
+    public void Unsettled_and_probability_free_records_are_counted_not_scored()
+    {
+        using var t = new TempDb();
+        var clock = FixedClock.Default();
+        Fx.Record(t.Db, clock, Fx.Open);
+        var p = new PacketExporter(t.Db, clock).Export(Fx.T50);
+        new ResearchImporter(t.Db, clock).Import(Fx.ValidRecord(p, clock, 0.6m).ToJsonString(), "manual");
+        new ResearchImporter(t.Db, clock).Import(Fx.ValidRecord(p, clock, prob: null, researchId: "r-2").ToJsonString(), "manual");
+        var score = ResearchScoring.Score(t.Db);
+        Assert.Equal((2, 1, 1), (score.Records, score.WithProbability, score.Unresolved));
+        Assert.Empty(score.Scored);
+        Assert.Null(score.MeanBrier);
     }
 }

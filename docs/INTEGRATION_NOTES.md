@@ -76,6 +76,9 @@ including refusals, is audited in `research_runs`:
 server-managed settings from a Team/Enterprise admin console. On a personal Pro/Max login neither normally exists.
 Check `/status` → `Setting sources` once on your machine.
 
+**Operator machine (Windows, verified 2026-11-23):** `kb research run` returned `IMPORTED (auth claude.ai, team)`.
+Claude Code is installed via npm under nvm4w and was launched through the unwrapped shim. The subscription is a Team plan.
+
 **This cloud container:** `claude auth status` reports `oauth_token` with no `CLAUDE_CODE_OAUTH_TOKEN`, which is a
 session-injected credential. The guard cannot prove that is subscription auth, so it refuses (verified live:
 `research_runs` outcome `refused`). Run the round trip on your machine after `claude auth login`.
@@ -108,13 +111,19 @@ spec's S7–S9 and S16 pages could not be re-read here.
   `market_type` is binary or scalar; only binary is supported.
 - **Rules:** `rules_primary`, `rules_secondary`, `early_close_condition`. Hashed together into a rules version.
 - **Tick size:** `price_ranges[{start,end,step}]` per market. The risk engine checks limits against it.
-- **Fees (unverified, so they block risk on real data):**
-  - Series `fee_type` is one of quadratic, quadratic_with_maker_fees, quadratic_with_combo_maker_fees, or flat, with a
-    `fee_multiplier`. Events can override both.
-  - The schedule PDF (kalshi.com/docs/kalshi-fee-schedule.pdf) was unreachable, so `FeeSchedules.Verified` is empty.
-    Real-data candidates are rejected with "fees unknown" (DATA-01).
-  - Only a labeled synthetic schedule, `ceil_cent(0.07 × max(1, multiplier) × C × P × (1−P))`, prices fixture data.
-  - To enable real data, add a `FeeSchedule` with its source, verification date, and effective date.
+- **Fees (verified 2026-11-23):** source is the Kalshi Fee Schedule PDF, "Last updated and effective: July 7, 2026"
+  (sha256 `c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601`), a copy provided by the operator.
+  - Taker fee = `round up(M × 0.07 × C × P × (1−P))`. M is a per-series multiplier, default 1. The non-standard list has
+    M values of 0, 1, or 2, for example; KXHIGHNY is not listed.
+  - Maker fee = `0.0175 × …` with default M = 0. It applies only to resting orders, and paper never rests orders.
+  - Discrepancy: the text says the fee rounds "such that fee + positionCost is rounded to a centicent", but the PDF's own
+    General Trading Fees Table matches rounding up to a whole **cent**. The code uses cent rounding; it reproduces all
+    21 table rows (test) and errs high.
+  - Paper uses `max(1, fee_multiplier)`. The API exposes one multiplier, and its mapping to the PDF's separate maker and
+    taker M is undocumented, so paper never charges less than the standard fee.
+  - Supported fee types: `quadratic` and `quadratic_with_maker_fees`. `flat` and combo fee types are unknown, so they block risk.
+  - Upcoming changes are announced at https://kalshi.com/fee-schedule. Add a new `FeeSchedule` with its effective date;
+    never edit an existing one.
 - **Rate limits (unverified):** client pacing is 250 ms between requests, and 429/5xx retry up to 3 times honoring `Retry-After`.
 
 ## Environment blockers (this cloud session)

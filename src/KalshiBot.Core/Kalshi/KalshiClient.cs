@@ -100,7 +100,7 @@ public sealed class KalshiPublicClient(HttpClient http, KalshiEndpoint endpoint,
 /// <summary>
 /// Serves synthetic Kalshi-shaped JSON from a directory so the pipeline can run offline.
 /// Path mapping: /trade-api/v2/markets/X -> markets/X.json, /markets/X/orderbook -> orderbooks/X.json,
-/// /events/X -> events/X.json, /series/X -> series/X.json. Missing file -> 404.
+/// /events/X -> events/X.json, /series/X -> series/X.json, /markets?series_ticker=S -> lists/S.json. Missing file -> 404.
 /// </summary>
 public sealed class FixtureHandler(string root) : HttpMessageHandler
 {
@@ -108,18 +108,21 @@ public sealed class FixtureHandler(string root) : HttpMessageHandler
     {
         if (request.Method != HttpMethod.Get) throw new InvalidOperationException("Fixture handler is read-only.");
         var path = Uri.UnescapeDataString(request.RequestUri!.AbsolutePath);
+        var query = System.Web.HttpUtility.ParseQueryString(request.RequestUri!.Query);
         const string prefix = "/trade-api/v2/";
         if (!path.StartsWith(prefix, StringComparison.Ordinal)) return Task.FromResult(NotFound());
         var parts = path[prefix.Length..].Split('/');
         string? file = parts switch
         {
+            ["markets"] when query["series_ticker"] is { } st => System.IO.Path.Combine(root, "lists", st + ".json"),
             ["markets", var t] => System.IO.Path.Combine(root, "markets", t + ".json"),
             ["markets", var t, "orderbook"] => System.IO.Path.Combine(root, "orderbooks", t + ".json"),
             ["events", var e] => System.IO.Path.Combine(root, "events", e + ".json"),
             ["series", var s] => System.IO.Path.Combine(root, "series", s + ".json"),
             _ => null,
         };
-        if (file is null || parts.Any(p => p.Contains("..")) || !File.Exists(file)) return Task.FromResult(NotFound());
+        if (file is null || parts.Any(p => p.Contains("..")) || (query["series_ticker"]?.Contains("..") ?? false) || !File.Exists(file))
+            return Task.FromResult(NotFound());
         return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
         {
             Content = new StringContent(File.ReadAllText(file), System.Text.Encoding.UTF8, "application/json"),

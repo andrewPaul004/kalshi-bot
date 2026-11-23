@@ -116,6 +116,15 @@ public sealed class Watchlist(Db db, TimeProvider time)
 
     public List<string> List() => db.Query("SELECT ticker FROM watchlist ORDER BY ticker", r => r.S("ticker"));
 
+    public bool AddSeries(string series) =>
+        db.Exec("INSERT OR IGNORE INTO watchlist_series (series_ticker, added_at) VALUES ($s, $a)",
+            ("$s", Normalize(series)), ("$a", Ts.ToText(time.GetUtcNow()))) == 1;
+
+    public bool RemoveSeries(string series) =>
+        db.Exec("DELETE FROM watchlist_series WHERE series_ticker = $s", ("$s", Normalize(series))) == 1;
+
+    public List<string> ListSeries() => db.Query("SELECT series_ticker FROM watchlist_series ORDER BY series_ticker", r => r.S("series_ticker"));
+
     private static string Normalize(string ticker)
     {
         var t = ticker.Trim();

@@ -43,7 +43,14 @@ public sealed class Recorder(Db db, KalshiPublicClient client, TimeProvider time
         db.Exec("UPDATE capture_runs SET status = 'abandoned', finished_at = $t, detail = COALESCE(detail, 'process ended before run finished') WHERE status = 'running'",
             ("$t", Ts.ToText(time.GetUtcNow())));
 
-    public async Task<CaptureSummary> CaptureAsync(IEnumerable<string> tickers, CancellationToken ct = default)
+    /// <summary>Upper bound on markets discovered per watched series per capture (a safety valve, not a target).</summary>
+    public const int MaxMarketsPerSeries = 200;
+
+    public async Task<CaptureSummary> CaptureAsync(IEnumerable<string> tickers, CancellationToken ct = default) =>
+        await CaptureAsync(tickers, [], ct);
+
+    /// <summary>Records the given markets plus every open market in each watched series (spec 3.1 recorder).</summary>
+    public async Task<CaptureSummary> CaptureAsync(IEnumerable<string> tickers, IEnumerable<string> series, CancellationToken ct = default)
     {
         RecoverAbandonedRuns();
         var origin = client.Endpoint.DataOrigin;
@@ -53,6 +60,32 @@ public sealed class Recorder(Db db, KalshiPublicClient client, TimeProvider time
             ("$s", Ts.ToText(time.GetUtcNow())), ("$o", origin), ("$b", client.Endpoint.BaseUrl), ("$v", AppVersion));
 
         var errors = new List<string>();
+        var discovered = new List<string>();
+        foreach (var seriesTicker in series.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal))
+        {
+            try
+            {
+                string? cursor = null;
+                var found = 0;
+                do
+                {
+                    var raw = await client.ListOpenMarketsAsync(seriesTicker, cursor, ct);
+                    StoreRaw(runId, raw);
+                    if (!raw.IsSuccess) { errors.Add($"series {seriesTicker}: market list HTTP {raw.Status}"); break; }
+                    var (page, next) = KalshiParse.MarketList(raw.Body);
+                    discovered.AddRange(page);
+                    found += page.Count;
+                    cursor = next;
+                } while (cursor is not null && found < MaxMarketsPerSeries);
+                if (found == 0) errors.Add($"series {seriesTicker}: no open markets");
+            }
+            catch (Exception e) when (e is FormatException or System.Text.Json.JsonException or HttpRequestException
+                                        || (e is TaskCanceledException && !ct.IsCancellationRequested))
+            {
+                errors.Add($"series {seriesTicker}: {e.GetType().Name}: {e.Message}");
+            }
+        }
+        tickers = tickers.Concat(discovered);
         var snapshots = 0;
         var rulesChanges = 0;
         var seenEvents = new HashSet<string>(StringComparer.Ordinal);
