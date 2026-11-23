@@ -1,0 +1,4 @@
+# Keep line endings right for each platform's wrapper.
+*.cmd text eol=crlf
+kb text eol=lf
+*.sh text eol=lf

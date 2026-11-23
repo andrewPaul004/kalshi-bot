@@ -12,7 +12,12 @@ Requirements: `kalshi-claude-subscription-spec.md`.
 
 ## Quick start
 
-Requires the .NET 10 SDK. `./kb` is a bash wrapper; on Windows use `dotnet run --project src/KalshiBot.Cli -- <args>`.
+Requires the .NET 10 SDK. Every `./kb ...` command has a Windows form:
+- PowerShell: `.\kb.cmd ...`
+- cmd: `kb.cmd ...`
+
+The extensionless `kb` file is the bash wrapper for macOS/Linux.
+Running it directly on Windows makes Windows ask which app to open it with.
 
 ```bash
 dotnet test                 # 133 tests, offline

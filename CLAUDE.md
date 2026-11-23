@@ -50,7 +50,7 @@ Read `docs/INTEGRATION_NOTES.md` before touching any Kalshi or Claude integratio
 
 ```bash
 dotnet build && dotnet test        # warnings are errors; xUnit v3 on Microsoft.Testing.Platform
-./kb help                          # CLI (bash wrapper); or: dotnet run --project src/KalshiBot.Cli -- help
+./kb help                          # CLI: bash wrapper on macOS/Linux; on Windows use .\kb.cmd help
 ./kb replay                        # frozen SYNTHETIC fixture replay (deterministic)
 ```
 

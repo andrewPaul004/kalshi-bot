@@ -63,6 +63,7 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
 ## Next concrete actions
 
 1. **On your machine:** a manual subscription round trip, run in a separate database for production observations.
+   On Windows, use `.\kb.cmd` wherever this says `./kb`.
    ```bash
    claude auth status                       # expect "authMethod": "claude.ai" and a subscriptionType
    # In claude.ai settings, confirm usage credits / extra usage are OFF, then:
