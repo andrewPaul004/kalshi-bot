@@ -82,20 +82,24 @@ public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunne
             if (InsideGitRepository(workDir))
                 return Audit(packetId, started, "refused", none, null, envNote + "temp directory is inside a git repository; project settings could load", null, null);
 
+            ClaudeLaunch launch;
+            try { launch = ClaudeLaunch.Resolve(_o.ClaudePath, env, OperatingSystem.IsWindows(), File.Exists, File.ReadAllText); }
+            catch (KalshiBotException e) { return Audit(packetId, started, "refused", none, null, envNote + e.Message, null, null); }
+
             ProcessResult versionRun;
             try
             {
-                versionRun = await processes.RunAsync(new ProcessSpec(_o.ClaudePath, ["--version"], env, workDir, null, TimeSpan.FromSeconds(60)), ct);
+                versionRun = await processes.RunAsync(launch.Spec(["--version"], env, workDir, null, TimeSpan.FromSeconds(60)), ct);
             }
             catch (System.ComponentModel.Win32Exception e)
             {
-                return Audit(packetId, started, "refused", none, null, envNote + $"could not start '{_o.ClaudePath}': {e.Message}", null, null);
+                return Audit(packetId, started, "refused", none, null, envNote + $"could not start '{launch.FileName}': {e.Message}", null, null);
             }
             var cliVersion = Regex.Match(versionRun.Stdout, @"\b\d+\.\d+\.\d+\b") is { Success: true } m ? m.Value : null;
             if (versionRun.ExitCode != 0 || cliVersion is null)
                 return Audit(packetId, started, "refused", none, null, envNote + "could not determine the installed Claude Code version", null, null);
 
-            var status = await processes.RunAsync(new ProcessSpec(_o.ClaudePath, ["auth", "status"], env, workDir, null, TimeSpan.FromSeconds(60)), ct);
+            var status = await processes.RunAsync(launch.Spec(["auth", "status"], env, workDir, null, TimeSpan.FromSeconds(60)), ct);
             var verdict = status.TimedOut
                 ? new AuthVerdict(false, null, null, ["`claude auth status` timed out"])
                 : BillingGuard.Evaluate(status.Stdout, env);
@@ -106,7 +110,7 @@ public sealed class ClaudeResearchRunner(Db db, TimeProvider time, IProcessRunne
             if (args.Any(a => BillingGuard.ForbiddenArguments.Contains(a)))
                 throw new InvalidOperationException("Refusing to run Claude with a billing-bypass argument.");
 
-            var run = await processes.RunAsync(new ProcessSpec(_o.ClaudePath, args, env, workDir, packet.Json, _o.Timeout), ct);
+            var run = await processes.RunAsync(launch.Spec(args, env, workDir, packet.Json, _o.Timeout), ct);
             if (run.TimedOut) return Audit(packetId, started, "failed", verdict, cliVersion, envNote + $"claude -p exceeded the {_o.Timeout} timeout", run.Stdout, null);
 
             string structured;

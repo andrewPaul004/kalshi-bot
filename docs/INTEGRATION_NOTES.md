@@ -64,6 +64,14 @@ including refusals, is audited in `research_runs`:
 6. **Before steps 1–5:** an unchanged packet that already has a record for this prompt version is skipped (spec §4.3), and
    a missing or stale owner attestation refuses the run.
 
+**Windows launch:**
+- An npm install (e.g. under nvm4w) gives only `claude.cmd`, a cmd.exe shim.
+- Starting a batch file makes cmd.exe re-parse every argument, which can corrupt the JSON schema argument (the
+  "BatBadBut" class). So `ClaudeLaunch` reads the shim and starts `node.exe` plus Claude Code's JS entry point
+  directly. A native `claude.exe` is used as is.
+- A shim it cannot unwrap is refused, with a pointer to `--claude <path to claude.exe>`.
+- `CLAUDE_CODE_GIT_BASH_PATH` passes the environment filter.
+
 **Residual risk the guard cannot see:** MDM profiles (macOS `com.anthropic.claudecode`, Windows HKLM policy) and
 server-managed settings from a Team/Enterprise admin console. On a personal Pro/Max login neither normally exists.
 Check `/status` → `Setting sources` once on your machine.

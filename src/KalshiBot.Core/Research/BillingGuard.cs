@@ -25,7 +25,10 @@ public static class BillingGuard
         "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "ALL_PROXY", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
         "USERPROFILE", "APPDATA", "LOCALAPPDATA", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "PROGRAMDATA",
         "PROGRAMFILES", "HOMEDRIVE", "HOMEPATH", "USERNAME", "COMPUTERNAME",
+        "SYSTEMDRIVE", "OS", "PROCESSOR_ARCHITECTURE", "NUMBER_OF_PROCESSORS", "PUBLIC", "ALLUSERSPROFILE",
+        "COMMONPROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432",
         "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_GIT_BASH_PATH", // Windows: where Claude Code finds Git Bash; not a credential or endpoint
     };
 
     /// <summary>Builds the child environment from the allowlist. Everything else is dropped and reported.</summary>

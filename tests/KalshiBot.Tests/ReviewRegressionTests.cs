@@ -124,3 +124,75 @@ public class ReviewRegressionTests
     private static ClaudeRunOptions Options(TempDb t) =>
         new() { ManagedSettingsDir = Path.Combine(t.Dir, "no-managed"), LockPath = Path.Combine(t.Dir, "research.lock") };
 }
+
+/// <summary>Windows launch of an npm-installed Claude Code never goes through cmd.exe.</summary>
+public class ClaudeLaunchTests
+{
+    private const string NpmShim = """
+        @ECHO off
+        GOTO start
+        :find_dp0
+        SET dp0=%~dp0
+        EXIT /b
+        :start
+        SETLOCAL
+        CALL :find_dp0
+
+        IF EXIST "%dp0%\node.exe" (
+          SET "_prog=%dp0%\node.exe"
+        ) ELSE (
+          SET "_prog=node"
+          SET PATHEXT=%PATHEXT:;.JS;=;%
+        )
+
+        endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\node_modules\@anthropic-ai\claude-code\cli.js" %*
+        """;
+
+    private static (string Dir, Dictionary<string, string> Env) Folder(params string[] files)
+    {
+        var dir = Directory.CreateTempSubdirectory("kb-launch-").FullName;
+        foreach (var f in files) File.WriteAllText(Path.Combine(dir, f), f.EndsWith(".cmd") ? NpmShim : "");
+        return (dir, new Dictionary<string, string> { ["Path"] = $@"C:\Windows\system32;{dir}" });
+    }
+
+    [Fact]
+    public void Npm_shim_is_unwrapped_to_node_and_the_js_entry_point()
+    {
+        var (dir, env) = Folder("claude", "claude.cmd", "node.exe"); // what nvm4w + npm install produce
+        var launch = ClaudeLaunch.Resolve("claude", env, windows: true, File.Exists, File.ReadAllText);
+        Assert.Equal(Path.Combine(dir, "node.exe"), launch.FileName);
+        Assert.Equal([Path.Combine(dir, @"node_modules\@anthropic-ai\claude-code\cli.js")], launch.PrefixArguments);
+        var spec = launch.Spec(["auth", "status"], env, dir, null, TimeSpan.FromSeconds(1));
+        Assert.Equal([launch.PrefixArguments[0], "auth", "status"], spec.Arguments);
+        Assert.DoesNotContain(".cmd", spec.FileName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Native_exe_is_preferred_and_used_directly()
+    {
+        var (dir, env) = Folder("claude.exe", "claude.cmd");
+        Assert.Equal(Path.Combine(dir, "claude.exe"), ClaudeLaunch.Resolve("claude", env, true, File.Exists, File.ReadAllText).FileName);
+    }
+
+    [Fact]
+    public void Unrecognized_shim_is_refused_not_run_through_cmd()
+    {
+        var (dir, env) = Folder();
+        File.WriteAllText(Path.Combine(dir, "claude.cmd"), "@echo off\r\nsomething-else %*\r\n");
+        Assert.Throws<KalshiBotException>(() => ClaudeLaunch.Resolve("claude", env, true, File.Exists, File.ReadAllText));
+    }
+
+    [Fact]
+    public void Non_windows_is_unchanged() =>
+        Assert.Equal(new ClaudeLaunch("claude", []), ClaudeLaunch.Resolve("claude", new Dictionary<string, string>(), false, _ => false, _ => ""));
+
+    [Fact]
+    public void Git_bash_location_passes_the_environment_filter_but_credentials_do_not()
+    {
+        var env = BillingGuard.SanitizedEnvironment(new Dictionary<string, string>
+        {
+            ["CLAUDE_CODE_GIT_BASH_PATH"] = @"C:\Program Files\Git\bin\bash.exe", ["ANTHROPIC_API_KEY"] = "sk",
+        }, out _);
+        Assert.Equal(["CLAUDE_CODE_GIT_BASH_PATH"], env.Keys.ToArray());
+    }
+}
