@@ -223,16 +223,18 @@ public sealed class Recorder(Db db, KalshiPublicClient client, TimeProvider time
         db.Exec("""
             INSERT INTO market_snapshots (capture_run_id, raw_market_id, raw_orderbook_id, rules_id, data_origin, observed_at,
                 ticker, event_ticker, market_type, title, yes_sub_title, status, open_time, close_time, expected_expiration_time,
-                yes_bid, yes_ask, no_bid, no_ask, last_price, volume, open_interest, result, price_ranges_json, orderbook_json)
+                yes_bid, yes_ask, no_bid, no_ask, last_price, volume, open_interest, result, price_ranges_json, orderbook_json,
+                strike_type, floor_strike, cap_strike)
             VALUES ($run, $rm, $rb, $rules, $o, $obs, $t, $e, $mt, $ti, $yst, $st, $ot, $ct, $eet,
-                $yb, $ya, $nb, $na, $lp, $v, $oi, $res, $pr, $ob)
+                $yb, $ya, $nb, $na, $lp, $v, $oi, $res, $pr, $ob, $stt, $fs, $cs)
             """,
             ("$run", runId), ("$rm", rawMarketId), ("$rb", rawBookId), ("$rules", rulesId), ("$o", origin),
             ("$obs", Ts.ToText(observedAt)), ("$t", m.Ticker), ("$e", m.EventTicker), ("$mt", m.MarketType), ("$ti", m.Title),
             ("$yst", m.YesSubTitle), ("$st", m.Status), ("$ot", T(m.OpenTime)), ("$ct", T(m.CloseTime)),
             ("$eet", T(m.ExpectedExpirationTime)), ("$yb", D(m.YesBid)), ("$ya", D(m.YesAsk)), ("$nb", D(m.NoBid)),
             ("$na", D(m.NoAsk)), ("$lp", D(m.LastPrice)), ("$v", D(m.Volume)), ("$oi", D(m.OpenInterest)),
-            ("$res", m.Result), ("$pr", m.PriceRangesJson), ("$ob", book?.ToJson()));
+            ("$res", m.Result), ("$pr", m.PriceRangesJson), ("$ob", book?.ToJson()),
+            ("$stt", m.StrikeType), ("$fs", D(m.FloorStrike)), ("$cs", D(m.CapStrike)));
 
     private static string? T(DateTimeOffset? t) => t is null ? null : Ts.ToText(t.Value);
     private static string? D(decimal? d) => d is null ? null : Dec.ToText(d.Value);

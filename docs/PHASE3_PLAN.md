@@ -56,6 +56,12 @@ Raw probes were read-only GETs, kept outside the repo. Settled-market counts bel
 | V7 | `/historical/markets/{ticker}/candlesticks` (and `/series/.../candlesticks` for the live partition) return **hourly `yes_bid`/`yes_ask` OHLC** for 2021–2026. **Kalshi history: 1,863 settled event-days, 2021-08-06 to 2026-11-22, 72 missing days** (including 2025-10-31 to at least 2025-11-05). Older tickers use the `HIGHNY-` prefix, newer ones `KXHIGHNY-`. | Kill gate A's market comparison is possible. Quotes are hourly closes, not depth. Probability comparison only, never P&L. |
 | V8 | `kb forecast collect` works against the live NWS API. 14 daytime-high vintages stored for Nov 23–29 (e.g. Nov 24 = 49°F), with `updateTime` and our retrieval time kept apart. | Collector field names are confirmed. Remaining caveat: NWS `updateTime` stayed `06:19Z` across two retrievals 1 hour apart, as expected for a 12-hour product. |
 
+**Settlement-source history (found while building W1).** The rules text named the NWS Daily Climate Report from
+2022-03 to 2025-03, the NWS "Climatological Report (Daily)" until 2026-08-13, and The Weather Company only for events
+from 2026-08-14 on. The 99.9% agreement above therefore mostly measures NWS-vs-NWS; only about 100 days are under the
+Weather Company regime, and they agree with the NWS high too. W2 must store the regime per day, and Stage A must report
+results for the Weather Company period separately. Stage B (prospective) runs entirely under the Weather Company rule.
+
 **Not yet verified:** the publication lag of each GFS MOS cycle (the plan assumes the 12Z product is out before
 19:00Z on D-1, 3+ hours before the decision time); whether the `HIGHNY-` and `KXHIGHNY-` series are the same contract
 economically (same station and source); and bid/ask depth on the thin tail buckets.
@@ -168,7 +174,7 @@ models, and a test that fails without the change.
 
 | # | Item | Notes |
 |---|---|---|
-| W1 | Parse `strike_type` / `floor_strike` / `cap_strike` into the market store via a new migration, read from stored raw bodies | V3. Test against a recorded KXHIGHNY body. |
+| W1 | **Done 2026-11-23.** Parse `strike_type` / `floor_strike` / `cap_strike` into the market store (migration 6, backfilled from stored raw bodies), with `OutcomeBucket` (`FromStrikes`, `FromRules`, `Resolve`) and `MarketSnapshot.Bucket` | V3. 34 tests, five mutations caught. Edge semantics and rules-text fallback checked against 8,606 real markets (INTEGRATION_NOTES). |
 | W2 | Truth collector: Kalshi `expiration_value` per settled event (live and `/historical`), with the IEM CLI high stored beside it as a cross-check. A day where they differ is flagged and reported (known: 2025-06-18), never silently patched. Kalshi's value wins. | V1/V2 (2a). Also covers the 72 missing days: they are excluded from scoring and listed. |
 | W3 | Archive importers for IEM **GFS MOS** (KNYC, 12Z cycle, 2010+), IEM CLI history, and Kalshi hourly candlesticks, into separate `archive:iem` / `archive:kalshi` databases | V5/V6/V7. Raw bodies plus hashes, like the recorder. NBM is not imported (stale on IEM). |
 | W4 | Evidence-aware forecast interface: change `IForecastModel.Forecast(MarketSnapshot)` to also take a point-in-time evidence view (forecast vintages as of decision time) | Test: a vintage received after the decision time must not change the forecast. |

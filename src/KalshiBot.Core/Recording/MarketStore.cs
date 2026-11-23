@@ -10,9 +10,13 @@ public sealed record MarketSnapshot(
     string MarketType, string? Title, string? YesSubTitle, string Status, DateTimeOffset? CloseTime,
     DateTimeOffset? ExpectedExpirationTime, decimal? YesBid, decimal? YesAsk, decimal? NoBid, decimal? NoAsk,
     decimal? LastPrice, decimal? Volume, decimal? OpenInterest, string? Result, string? PriceRangesJson,
-    OrderBook? Book, long RulesId, long RawMarketId, long? RawOrderbookId)
+    OrderBook? Book, long RulesId, long RawMarketId, long? RawOrderbookId,
+    string? StrikeType = null, decimal? FloorStrike = null, decimal? CapStrike = null)
 {
     public bool IsSynthetic => Common.DataOrigin.IsSynthetic(DataOrigin);
+
+    /// <summary>The outcomes this market pays YES on, from its strike fields. Null = unknown, so a model must abstain.</summary>
+    public OutcomeBucket? Bucket => OutcomeBucket.FromStrikes(StrikeType, FloorStrike, CapStrike);
 }
 
 public sealed record MarketRules(long Id, string Ticker, string Sha256, string Primary, string Secondary,
@@ -98,7 +102,8 @@ public sealed class MarketStore(Db db)
         r.DN("yes_bid"), r.DN("yes_ask"), r.DN("no_bid"), r.DN("no_ask"), r.DN("last_price"),
         r.DN("volume"), r.DN("open_interest"), r.Str("result"), r.Str("price_ranges_json"),
         r.Str("orderbook_json") is { } ob ? OrderBook.FromJson(ob) : null,
-        r.L("rules_id"), r.L("raw_market_id"), r.LN("raw_orderbook_id"));
+        r.L("rules_id"), r.L("raw_market_id"), r.LN("raw_orderbook_id"),
+        r.Str("strike_type"), r.DN("floor_strike"), r.DN("cap_strike"));
 
     private static MarketRules MapRules(SqliteDataReader r) => new(
         r.L("id"), r.S("ticker"), r.S("rules_sha256"), r.S("rules_primary"), r.S("rules_secondary"),

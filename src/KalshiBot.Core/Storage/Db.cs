@@ -17,7 +17,9 @@ public sealed class Db : IDisposable
         Path = path;
     }
 
-    public static Db Open(string path)
+    /// <param name="maxSchemaVersion">Stop migrating at this version. Tests use it to build an older database and
+    /// prove an upgrade; production always opens at the latest version.</param>
+    public static Db Open(string path, int maxSchemaVersion = int.MaxValue)
     {
         if (path != ":memory:")
         {
@@ -42,7 +44,7 @@ public sealed class Db : IDisposable
             db.Exec("PRAGMA journal_mode = WAL;");
             db.Exec("PRAGMA synchronous = FULL;");
         }
-        Schema.Migrate(db);
+        Schema.Migrate(db, maxSchemaVersion);
         return db;
     }
 

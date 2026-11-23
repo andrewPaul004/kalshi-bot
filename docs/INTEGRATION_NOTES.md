@@ -110,6 +110,16 @@ spec's S7–S9 and S16 pages could not be re-read here.
   Paper trading requires `active`. Paper settlement requires `finalized` with `result` in {yes, no}.
   `market_type` is binary or scalar; only binary is supported.
 - **Rules:** `rules_primary`, `rules_secondary`, `early_close_condition`. Hashed together into a rules version.
+- **Strike fields (verified 2026-11-23, KXHIGHNY):** `strike_type` is `between`, `less`, or `greater`, with numeric
+  `floor_strike` / `cap_strike`. Checked against 8,606 markets with these fields (live and `/historical`, 2022-2026) and
+  4,280 of them with a settled result and `expiration_value`: zero mismatches, and no market had an unexpected extra field.
+  - `between`: floor..cap inclusive. `less`: value < cap. `greater`: value > floor. Whole °F. Parsed in `OutcomeBucket`.
+  - Markets from 2021 to early 2022 and a few from 2025 carry no strike fields; `OutcomeBucket.FromRules` reads their
+    rules text (1,414 of 1,418 parse; 4 odd phrasings fail closed). Where both exist, the two agree on all 8,606.
+  - Settlement source in the rules text changed over time: unnamed (2021-08 to 2022-03), NWS "Daily Climate Report"
+    (2022-03 to 2025-03), NWS "Climatological Report (Daily)" (2025-03 to 2026-08-13), then The Weather Company (events
+    from 2026-08-14). Older markets live under the `HIGHNY-` series prefix; newer ones `KXHIGHNY-`.
+  - `expiration_value` is the settled value as a decimal string (e.g. "61.00"). It is empty on many 2022-2024 markets.
 - **Tick size:** `price_ranges[{start,end,step}]` per market. The risk engine checks limits against it.
 - **Fees (verified 2026-11-23):** source is the Kalshi Fee Schedule PDF, "Last updated and effective: July 7, 2026"
   (sha256 `c326a69f596a11e8f8be2620402d39a8d4823920c21cc97c93a114d862699601`), a copy provided by the operator.

@@ -504,15 +504,27 @@ public static class Schema
         );
         CREATE INDEX ix_nws_periods_date ON nws_forecast_periods (location, local_date, is_daytime, received_at);
         """),
+        (6, """
+        -- Strike fields from the market payload (Phase 3 bucket edges, docs/PHASE3_PLAN.md W1). Parsed values are stored
+        -- beside the raw body, which stays the record. Existing snapshots are backfilled from their stored raw market body.
+        ALTER TABLE market_snapshots ADD COLUMN strike_type  TEXT;
+        ALTER TABLE market_snapshots ADD COLUMN floor_strike TEXT;
+        ALTER TABLE market_snapshots ADD COLUMN cap_strike   TEXT;
+
+        UPDATE market_snapshots SET
+            strike_type  = (SELECT json_extract(r.body, '$.market.strike_type')                  FROM raw_responses r WHERE r.id = market_snapshots.raw_market_id AND json_valid(r.body)),
+            floor_strike = (SELECT CAST(json_extract(r.body, '$.market.floor_strike') AS TEXT)   FROM raw_responses r WHERE r.id = market_snapshots.raw_market_id AND json_valid(r.body)),
+            cap_strike   = (SELECT CAST(json_extract(r.body, '$.market.cap_strike')   AS TEXT)   FROM raw_responses r WHERE r.id = market_snapshots.raw_market_id AND json_valid(r.body));
+        """),
     ];
 
     public static int LatestVersion => Migrations[^1].Version;
 
-    public static void Migrate(Db db)
+    public static void Migrate(Db db, int maxVersion = int.MaxValue)
     {
         db.Exec("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);");
         var current = db.Scalar<long?>("SELECT MAX(version) FROM schema_migrations") ?? 0;
-        foreach (var (version, sql) in Migrations.Where(m => m.Version > current))
+        foreach (var (version, sql) in Migrations.Where(m => m.Version > current && m.Version <= maxVersion))
         {
             db.InTransaction(() =>
             {

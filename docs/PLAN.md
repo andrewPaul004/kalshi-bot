@@ -88,3 +88,8 @@ scoped to this repository. No third-party code was copied, so the §10 per-copy 
   CLINYC; Kalshi's `expiration_value` is the truth, and the NWS CLI high matches it on 1,860 of 1,861 days. Kalshi history
   holds 1,863 settled event-days from 2021-08-06, with hourly bid/ask candlesticks. IEM NBM text stopped on 2026-05-04, so
   M1 takes GFS MOS (12Z) as its input. Still unverified: GFS MOS publication lag, `HIGHNY`/`KXHIGHNY` equivalence, tail depth.
+- **2026-11-23 W1 done: market strike fields.** Migration 6 adds `strike_type`/`floor_strike`/`cap_strike` to
+  `market_snapshots`, backfilled from stored raw bodies. `OutcomeBucket` turns them into whole-degree YES outcomes
+  (`between` inclusive, `less` = below cap, `greater` = above floor) and abstains (null) on anything unrecognised.
+  Rules-text fallback covers strike-less markets. Verified on 8,606 real markets. The settlement source named in the
+  rules changed over time (NWS until 2026-08-13, then The Weather Company); W2 will record the regime per day.

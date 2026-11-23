@@ -55,7 +55,8 @@ public sealed record MarketData(
     DateTimeOffset? OpenTime, DateTimeOffset? CloseTime, DateTimeOffset? ExpectedExpirationTime,
     decimal? YesBid, decimal? YesAsk, decimal? NoBid, decimal? NoAsk, decimal? LastPrice,
     decimal? Volume, decimal? OpenInterest, string? Result,
-    string RulesPrimary, string RulesSecondary, string? EarlyCloseCondition, string? PriceRangesJson)
+    string RulesPrimary, string RulesSecondary, string? EarlyCloseCondition, string? PriceRangesJson,
+    string? StrikeType = null, decimal? FloorStrike = null, decimal? CapStrike = null)
 {
     public string RulesSha256 => Hash.Sha256Hex(RulesPrimary + "\u001f" + RulesSecondary + "\u001f" + (EarlyCloseCondition ?? ""));
 }
@@ -97,7 +98,10 @@ public static class KalshiParse
             RulesPrimary: ReqAllowEmpty(m, "rules_primary"),
             RulesSecondary: ReqAllowEmpty(m, "rules_secondary"),
             EarlyCloseCondition: Opt(m, "early_close_condition"),
-            PriceRangesJson: m["price_ranges"] is JsonArray pr ? pr.ToJsonString() : null);
+            PriceRangesJson: m["price_ranges"] is JsonArray pr ? pr.ToJsonString() : null,
+            StrikeType: Opt(m, "strike_type"),
+            FloorStrike: Num(m, "floor_strike"),
+            CapStrike: Num(m, "cap_strike"));
     }
 
     public static OrderBook Orderbook(string body)
