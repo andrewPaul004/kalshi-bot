@@ -171,8 +171,7 @@ are not worth spending.
 
 ## 8. Open decisions (operator)
 
-- Whether a 3–4 month observation period is acceptable, or the experiment should be stopped at kill gate A
-  regardless.
+- ~~Whether a 3–4 month observation period is acceptable.~~ **Decided 2026-11-23: yes.** Stage B runs if kill gate A passes.
 - Optional: allow `mesonet.agron.iastate.edu`, `api.weather.gov`, and the Kalshi market-data host in the cloud
   environment, so V5–V8 can be checked and W3 built against live responses from there instead of hand-written
   fixtures.
