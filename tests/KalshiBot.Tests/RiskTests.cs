@@ -204,7 +204,8 @@ public class StrategyTests
     public void Fixture_model_refuses_live_data()
     {
         var s = Snapshot();
-        Assert.NotNull(Fx.Model().Forecast(s));
-        Assert.Null(Fx.Model().Forecast(s with { DataOrigin = DataOrigin.LiveProduction }));
+        var none = new EmptyEvidence(s.ObservedAt);
+        Assert.NotNull(Fx.Model().Forecast(s, none));
+        Assert.Null(Fx.Model().Forecast(s with { DataOrigin = DataOrigin.LiveProduction }, none));
     }
 }

@@ -37,8 +37,11 @@ public interface IForecastModel
 {
     string Id { get; }
 
-    /// <summary>Deterministic: same snapshot, same forecast. Null means abstain.</summary>
-    Forecast? Forecast(MarketSnapshot snapshot);
+    /// <summary>
+    /// Deterministic: same snapshot and same evidence view, same forecast. Null means abstain. The view is fixed at decision
+    /// time (<see cref="IEvidenceView.AsOf"/>); a model reads evidence only through it.
+    /// </summary>
+    Forecast? Forecast(MarketSnapshot snapshot, IEvidenceView evidence);
 }
 
 /// <summary>A fee schedule that applies to this market at this time. Absent = fees unknown = no new risk (DATA-01).</summary>

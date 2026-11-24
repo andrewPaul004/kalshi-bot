@@ -106,3 +106,6 @@ scoped to this repository. No third-party code was copied, so the §10 per-copy 
   must be measured by the live collector. GFS MOS and candles are fully collected (9,568 windows, 0 failed; candle download was
   resumed after a low-memory stop). Quotes are sparse in thin tail buckets: a two-sided quote exists on at least one market for
   1,808 of 1,863 event-days but on every market for only 767. The market baseline needs a rule for markets with no real quote.
+- **2026-11-23 W4: point-in-time evidence.** `IForecastModel.Forecast` now takes an `IEvidenceView` fixed at decision time. `ArchiveEvidence`
+  exposes a MOS run only once cycle time + lag <= AsOf; `EvidenceGuard` (used by `PaperEngine`) refuses a view dated after the snapshot.
+  Later vintages therefore cannot change a forecast, retrospectively or live.

@@ -63,7 +63,7 @@ public sealed class PaperEngine(Db db, TimeProvider time, RiskEngine risk, Paper
     /// <summary>Test hook: throw at a named point inside a transaction to prove rollback.</summary>
     internal Action<string>? FaultInjector { get; set; }
 
-    public PaperRunResult Run(string accountName, string ticker, IStrategy strategy, IForecastModel model, ExecutionMode mode = ExecutionMode.Paper)
+    public PaperRunResult Run(string accountName, string ticker, IStrategy strategy, IForecastModel model, ExecutionMode mode = ExecutionMode.Paper, IEvidenceView? evidence = null)
     {
         var accountId = _ledger.FindAccount(accountName) ?? throw new KalshiBotException($"Paper account '{accountName}' not found. Run 'kb paper init'.");
         var resolved = ResolvePending(accountId);
@@ -76,7 +76,7 @@ public sealed class PaperEngine(Db db, TimeProvider time, RiskEngine risk, Paper
         var series = ev is null ? null : _store.SeriesFor(ev.SeriesTicker, snapshot);
         var fees = FeeSchedules.Resolve(snapshot.DataOrigin, ev?.FeeTypeOverride ?? series?.FeeType,
             ev?.FeeMultiplierOverride ?? series?.FeeMultiplier, now, out var feeReason);
-        var forecast = model.Forecast(snapshot);
+        var forecast = EvidenceGuard.Run(model, snapshot, evidence ?? new EmptyEvidence(snapshot.ObservedAt));
         var haltRaised = CheckDailyLoss(accountId, now);
 
         var state = _ledger.State(accountId, _controls.Halted);

@@ -51,7 +51,7 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
 - Series watching (`watch add-series`).
 - A recorder lock, so scheduled and manual runs can't collide.
 - `record-scheduled.cmd` for Windows Task Scheduler.
-- `research score` (Brier score against outcome and against the same-time market mid). 242 tests.
+- `research score` (Brier score against outcome and against the same-time market mid). 250 tests.
 
 ## Blockers (exact)
 
@@ -90,6 +90,6 @@ Spec traceability, AC-01 to AC-22: `docs/PLAN.md`.
    Company value, which matches the NWS CLI high on 99.9% of 1,861 days. The model input is IEM GFS MOS, because IEM's NBM
    feed stopped on 2026-05-04. **W1 (strike parsing, migration 6) and W2 (truth data, migration 7) are done.** `kb truth
    report` on the operator's machine: 1,863 Kalshi settled days, 1,860 of 1,861 agree with the NWS high, 72 days
-   excluded, 6,096-day scoring series (data/truth.db). **W3 (migration 8, `kb archive`) is done**: GFS MOS and Kalshi candles (9,568 windows, 119,014 hourly candles) are fully collected; `.\kb.cmd archive report` shows coverage. Then W4 (point-in-time evidence interface), W5 (model fit), W6 (Stage A).
+   excluded, 6,096-day scoring series (data/truth.db). **W3 (migration 8, `kb archive`) is done**: GFS MOS and Kalshi candles (9,568 windows, 119,014 hourly candles) are fully collected; `.\kb.cmd archive report` shows coverage. **W4 (point-in-time evidence view, `IEvidenceView`/`ArchiveEvidence`/`EvidenceGuard`) is done; 250 tests.** Next: W5 (model fit), W6 (Stage A).
 4. Optional: allow `external-api.kalshi.com`, `api.weather.gov`, and `mesonet.agron.iastate.edu` in the cloud
    environment's network settings, so collectors can be verified against live data from here.

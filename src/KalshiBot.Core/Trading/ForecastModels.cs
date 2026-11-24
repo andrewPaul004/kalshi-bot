@@ -11,7 +11,7 @@ namespace KalshiBot.Core.Trading;
 public sealed class NoValidatedModel : IForecastModel
 {
     public string Id => "none";
-    public Forecast? Forecast(MarketSnapshot snapshot) => null;
+    public Forecast? Forecast(MarketSnapshot snapshot, IEvidenceView evidence) => null;
 }
 
 /// <summary>
@@ -34,7 +34,7 @@ public sealed class SyntheticFixtureModel : IForecastModel
 
     public string Id => "synthetic-fixture-model/1";
 
-    public Forecast? Forecast(MarketSnapshot snapshot)
+    public Forecast? Forecast(MarketSnapshot snapshot, IEvidenceView evidence)
     {
         if (!snapshot.IsSynthetic || !_table.TryGetValue(snapshot.Ticker, out var e)) return null;
         return new Forecast(Id, e.P, e.U, "SYNTHETIC fixed fixture value (not a forecast)", snapshot.ObservedAt,
